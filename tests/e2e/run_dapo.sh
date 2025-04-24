@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -xeuo pipefail
+#set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-8}
 

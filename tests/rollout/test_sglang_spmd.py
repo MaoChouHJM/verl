@@ -28,7 +28,11 @@
 import os
 
 import torch
-from sglang.srt.entrypoints.verl_engine import VerlEngine
+import pytest
+try:
+    from sglang.srt.entrypoints.verl_engine import VerlEngine
+except ImportError:
+    pytest.skip('need sglang', allow_module_level=True)
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
