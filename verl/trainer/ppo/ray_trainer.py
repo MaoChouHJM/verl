@@ -863,6 +863,51 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _report_timing_stat(self):
+        def report_stat(timing_data):
+            if timing_data[0] is None:
+                return
+            stats_report = {}
+            node_names = [list(node_data.keys())[0] for node_data in timing_data]
+            try:
+                stage_names = list(list(timing_data[0].values())[0].keys())
+            except BaseException as e:
+                print(timing_data[0], flush=True)
+                raise ValueError(2)
+            
+            for stage_name in stage_names:
+                try:
+                    durations =  [list(node_data.values())[0][stage_name] for node_data in timing_data]
+                except BaseException as e:
+                    print(stage_names, flush=True)
+                    raise ValueError(2)
+
+                if durations:
+                    stats = {
+                        "count": len(durations),
+                        "mean": np.mean(durations),
+                        "median": np.median(durations),
+                        "min": np.min(durations),
+                        "max": np.max(durations),
+                        "p90": np.percentile(durations, 90) 
+                    }
+                    stats_report[stage_name] = stats
+            from verl.utils.print_helper import print_nested_dict_as_table
+            np.set_printoptions(precision=5, suppress=True)
+            print_nested_dict_as_table(stats_report)
+
+        
+        if self.use_critic:
+            report_stat(self.critic_wg.get_timing_report())
+ 
+        if self.use_reference_policy:
+            report_stat(self.ref_policy_wg.get_timing_report())
+
+        if self.use_rm:
+            report_stat(self.rm_wg.get_timing_report())
+
+        report_stat(self.actor_rollout_wg.get_timing_report())
+
     def fit(self):
         """
         The training loop of PPO.

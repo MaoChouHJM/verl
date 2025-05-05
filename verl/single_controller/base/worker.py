@@ -17,7 +17,9 @@ the class for Worker
 
 import os
 import socket
+import time
 from dataclasses import dataclass
+from contextlib import contextmanager
 
 from .decorator import Dispatch, Execute, register
 
@@ -186,6 +188,9 @@ class Worker(WorkerHelper):
             torch.cuda.set_device(int(cuda_visible_devices))
         ###
 
+        # perf statistic
+        self.timing_data = {}
+
     def _configure_with_meta(self, meta: WorkerMeta):
         """
         This function should only be called inside by WorkerGroup
@@ -228,3 +233,31 @@ class Worker(WorkerHelper):
     def execute_func_rank_zero(self, func, *args, **kwargs):
         result = func(*args, **kwargs)
         return result
+
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_timing_report(self):
+        if self.timing_data == {}:
+            return
+        host, port = self.get_master_addr_port()
+        host_port = str(host) + ":" + str(port)
+        res = {}
+        from copy import deepcopy
+        res[host_port] = deepcopy(self.timing_data)
+        self.timing_data.clear()
+        return res
