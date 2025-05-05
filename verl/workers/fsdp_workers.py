@@ -510,9 +510,10 @@ class ActorRolloutRefWorker(Worker):
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
         with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            with self.timing_record('update_actor/preprocess_data'):
+                data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
-            with Timer(name="update_policy", logger=None) as timer:
+            with Timer(name="update_policy", logger=None) as timer, self.timing_record('update_actor/update_policy'):
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
@@ -531,24 +532,31 @@ class ActorRolloutRefWorker(Worker):
             # TODO: here, we should return all metrics
             output = DataProto(meta_info={"metrics": metrics})
 
-            output = self.ulysses_sharding_manager.postprocess_data(data=output)
+
+            with self.timing_record('update_actor/postprocess_data'):
+                output = self.ulysses_sharding_manager.postprocess_data(data=output)
             output = output.to("cpu")
 
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+        with self.timing_record('update_actor/offload_fsdp_model'):
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+        with self.timing_record('update_actor/offload_fsdp_model_opt'):
+            if self._is_offload_optimizer:
+                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
-        prompts = prompts.to(torch.cuda.current_device())
 
-        assert self._is_rollout
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+        with self.timing_record('generate_sequences/prompts_to_device'):
+            prompts = prompts.to(torch.cuda.current_device())
+
+        with self.timing_record('generate_sequences/load_fsdp_model'):
+            assert self._is_rollout
+            if self._is_offload_param:
+                load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id
@@ -559,55 +567,73 @@ class ActorRolloutRefWorker(Worker):
             else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
-        with self.rollout_sharding_manager:
+        with self.timing_record('generate_sequences/sync_gen'), self.rollout_sharding_manager:
             # after parameters sync with rollout, offload actor model to CPU
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            if self._is_offload_optimizer:
-                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+            with self.timing_record('generate_sequences/offload_fsdp_model'):
+                if self._is_offload_param:
+                    offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            with self.timing_record('generate_sequences/offload_fsdp_model_opt'):
+                if self._is_offload_optimizer:
+                    offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
-            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-            output = self.rollout.generate_sequences(prompts=prompts)
-            output = self.rollout_sharding_manager.postprocess_data(output)
+            with self.timing_record('generate_sequences/preprocess_data'):
+                prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            with self.timing_record('generate_sequences/generate_sequences'):
+                output = self.rollout.generate_sequences(prompts=prompts)
+            with self.timing_record('generate_sequences/postprocess_data'):
+                output = self.rollout_sharding_manager.postprocess_data(output)
 
-        output = output.to("cpu")
+
+        with self.timing_record('generate_sequences/D2H'):
+            output = output.to("cpu")
 
         # clear kv cache
-        torch.cuda.empty_cache()
+        with self.timing_record('generate_sequences/clear_kv_cache'):
+            torch.cuda.empty_cache()
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        with self.timing_record('compute_log_prob/load_fsdp_model'):
+            if self._is_offload_param:
+                load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        with self.timing_record('compute_log_prob/H2D'):
+            data = data.to(torch.cuda.current_device())
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
         # perform recompute log_prob
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
-            output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+
+        with self.timing_record('compute_log_prob/sync_compute_log_prob'), self.ulysses_sharding_manager:
+            with self.timing_record('compute_log_prob/preprocess_data'):
+                data = self.ulysses_sharding_manager.preprocess_data(data)
+            with self.timing_record('compute_log_prob/compute_log_prob'):
+                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
             output = DataProto.from_dict(
                 tensors={"old_log_probs": output, "entropys": entropys},
                 meta_info={"temperature": self.config.rollout.temperature},
             )
-            output = self.ulysses_sharding_manager.postprocess_data(output)
+            with self.timing_record('compute_log_prob/postprocess_data'):
+                output = self.ulysses_sharding_manager.postprocess_data(output)
 
-        output = output.to("cpu")
+        with self.timing_record('compute_log_prob/D2H'):
+            output = output.to("cpu")
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
         if self.world_size > 1:
             self.actor.actor_module._handle.reshard(True)
 
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
+        with self.timing_record('compute_log_prob/offload_fsdp_model'):
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
         return output
 
@@ -616,20 +642,27 @@ class ActorRolloutRefWorker(Worker):
         assert self._is_ref
 
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        with self.timing_record('compute_ref_log_prob/H2D'):
+            data = data.to(torch.cuda.current_device())
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         data.meta_info["temperature"] = self.config.rollout.temperature
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-            output = DataProto.from_dict(tensors={"ref_log_prob": output})
-            output = self.ulysses_sharding_manager.postprocess_data(output)
 
-        output = output.to("cpu")
+        with self.timing_record('compute_ref_log_prob/sync_compute_ref_log_prob'), self.ulysses_sharding_manager:
+            with self.timing_record('compute_ref_log_prob/preprocess_data'):
+                data = self.ulysses_sharding_manager.preprocess_data(data)
+            with self.timing_record('compute_ref_log_prob/compute_log_prob'):
+                output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            with self.timing_record('compute_ref_log_prob/postprocess_data'):
+                output = self.ulysses_sharding_manager.postprocess_data(output)
+
+
+        with self.timing_record('compute_ref_log_prob/D2H'):
+            output = output.to("cpu")
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -644,16 +677,21 @@ class ActorRolloutRefWorker(Worker):
         assert self._is_actor
         import torch
 
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+        with self.timing_record('save_ckpt/load_fsdp_model'):
+            if self._is_offload_param:
+                load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        self.checkpoint_manager.save_checkpoint(
+
+        with self.timing_record('save_ckpt/save_ckpt'):
+            self.checkpoint_manager.save_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
         )
 
-        torch.distributed.barrier()
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+        with self.timing_record('save_ckpt/barrier'):
+            torch.distributed.barrier()
+        with self.timing_record('save_ckpt/offload_fsdp_model'):
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
@@ -892,40 +930,52 @@ class CriticWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        with self.timing_record('critical/compute_values/H2D'):
+            data = data.to(torch.cuda.current_device())
 
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.critic_module)
+        with self.timing_record('critical/compute_values/load_fsdp_model'):
+            if self._is_offload_param:
+                load_fsdp_model_to_gpu(self.critic_module)
         micro_batch_size = self.config.forward_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz
         # perform forward computation
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data=data)
-            values = self.critic.compute_values(data=data)
+        with self.timing_record('critical/compute_values/sync_compute'), self.ulysses_sharding_manager:
+            with self.timing_record('critical/compute_values/preprocess_data'):
+                data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            with self.timing_record('critical/compute_values/compute_values'):
+                values = self.critic.compute_values(data=data)
             output = DataProto.from_dict(tensors={"values": values})
-            output = self.ulysses_sharding_manager.postprocess_data(data=output)
+            with self.timing_record('critical/compute_values/postprocess_data'):
+                output = self.ulysses_sharding_manager.postprocess_data(data=output)
 
-        output = output.to("cpu")
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
+
+        with self.timing_record('critical/compute_values/D2H'):
+            output = output.to("cpu")
+        with self.timing_record('critical/compute_values/offload_fsdp_model'):
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.critic_module)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_critic(self, data: DataProto):
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.critic_module)
-        if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
+        with self.timing_record('critical/update_critic/D2H'):
+            data = data.to(torch.cuda.current_device())
+        with self.timing_record('critical/update_critic/load_fsdp_model'):
+            if self._is_offload_param:
+                load_fsdp_model_to_gpu(self.critic_module)
+        with self.timing_record('critical/update_critic/load_fsdp_model_opt'):
+            if self._is_offload_optimizer:
+                load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
 
         # perform forward computation
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data=data)
+        with self.timing_record('critical/update_critic/sync_update_critic'), self.ulysses_sharding_manager:
+            with self.timing_record('critical/update_critic/preprocess_data'):
+                data = self.ulysses_sharding_manager.preprocess_data(data=data)
 
-            with Timer(name="update_critic", logger=None) as timer:
+            with self.timing_record('critical/update_critic/update_critic'), Timer(name="update_critic", logger=None) as timer:
                 metrics = self.critic.update_critic(data=data)
             delta_time = timer.last
 
@@ -938,30 +988,39 @@ class CriticWorker(Worker):
             metrics["critic/lr"] = lr
 
             output = DataProto(batch=None, meta_info={"metrics": metrics})
-            output = self.ulysses_sharding_manager.postprocess_data(data=output)
+            with self.timing_record('critical/update_critic/postprocess_data'):
+                output = self.ulysses_sharding_manager.postprocess_data(data=output)
 
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.critic_optimizer)
+        with self.timing_record('critical/update_critic/offload_fsdp_model'):
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.critic_module)
+        with self.timing_record('critical/update_critic/offload_fsdp_opt'):
+            if self._is_offload_optimizer:
+                offload_fsdp_optimizer(optimizer=self.critic_optimizer)
 
-        output = output.to("cpu")
+
+        with self.timing_record('critical/update_critic/D2H'):
+            output = output.to("cpu")
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         import torch
 
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.critic_module)
+        with self.timing_record('critical/save_ckpt/load_fsdp_model'):
+            if self._is_offload_param:
+                load_fsdp_model_to_gpu(self.critic_module)
 
-        self.checkpoint_manager.save_checkpoint(
+        with self.timing_record('critical/save_ckpt/save_ckpt'):
+            self.checkpoint_manager.save_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
         )
 
-        torch.distributed.barrier()
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
+        with self.timing_record('critical/save_ckpt/barrier'):
+            torch.distributed.barrier()
+        with self.timing_record('critical/save_ckpt/offload_fsdp_model'):
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.critic_module)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
@@ -1247,12 +1306,14 @@ class RewardModelWorker(Worker):
             rm_data = DataProto.from_dict(rm_inputs)
 
         # Support all hardwares
-        rm_data.batch = rm_data.batch.to(torch.cuda.current_device())
+        with self.timing_record('reward/compute_rm_score/D2H'):
+            rm_data.batch = rm_data.batch.to(torch.cuda.current_device())
 
         # perform forward computation
-        with self.ulysses_sharding_manager:
-            rm_data = self.ulysses_sharding_manager.preprocess_data(data=rm_data)
-            data = self.ulysses_sharding_manager.preprocess_data(data=data)
+        with self.timing_record('reward/compute_rm_score/sync_compute'), self.ulysses_sharding_manager:
+            with self.timing_record('reward/compute_rm_score/preprocess_data'):
+                rm_data = self.ulysses_sharding_manager.preprocess_data(data=rm_data)
+                data = self.ulysses_sharding_manager.preprocess_data(data=data)
 
             use_dynamic_bsz = self.config.use_dynamic_bsz
             if use_dynamic_bsz:
@@ -1261,9 +1322,10 @@ class RewardModelWorker(Worker):
             else:
                 micro_batches = rm_data.batch.split(self.config.micro_batch_size_per_gpu)
             output = []
-            for micro_batch in micro_batches:
-                rm_score = self._forward_micro_batch(micro_batch)
-                output.append(rm_score)
+            with self.timing_record('reward/compute_rm_score/preprocess_data'):
+                for micro_batch in micro_batches:
+                    rm_score = self._forward_micro_batch(micro_batch)
+                    output.append(rm_score)
             scores = torch.cat(output, dim=0)  # (batch_size)
 
             if use_dynamic_bsz:
@@ -1275,11 +1337,13 @@ class RewardModelWorker(Worker):
             token_level_scores = self._expand_to_token_level(data, scores)
             # Note that this is only the scores, may not be the final rewards used to train RL
             output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
-            output = self.ulysses_sharding_manager.postprocess_data(data=output)
+            with self.timing_record('reward/compute_rm_score/postprocess_data'):
+                output = self.ulysses_sharding_manager.postprocess_data(data=output)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
         self.reward_module._handle.reshard(True)
 
-        output = output.to("cpu")
+        with self.timing_record('reward/compute_rm_score/D2H'):
+            output = output.to("cpu")
         return output

@@ -72,6 +72,8 @@ class RayDAPOTrainer(RayPPOTrainer):
             if self.config.trainer.get("val_only", False):
                 return
 
+
+        self._report_timing_stat()
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
@@ -289,6 +291,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
                     ):
                         with _timer("testing", timing_raw):
+                            self._report_timing_stat()
                             val_metrics: dict = self._validate()
                             if is_last_step:
                                 last_val_metrics = val_metrics
@@ -315,6 +318,7 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+                self._report_timing_stat()
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
