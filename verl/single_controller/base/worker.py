@@ -18,6 +18,7 @@ the class for Worker
 import os
 import socket
 import time
+import wandb
 from dataclasses import dataclass
 from contextlib import contextmanager
 
@@ -190,6 +191,17 @@ class Worker(WorkerHelper):
 
         # perf statistic
         self.timing_data = {}
+        # wandb init
+        timestamp = os.getenv('TIMESTAMP', 'null')
+        project_name = os.getenv('MONDB_PROJECT_NAME', 'test')
+        print(f'hjm_dbg {timestamp=} {project_name=}')
+        
+        wandb.init(project=project_name, 
+                   name=f'worker-{self.rank}',
+                   group=f'Worker-{timestamp}',
+                   config={'rank': self.rank, 'world_size': self.world_size},
+                   reinit=False)
+
 
     def _configure_with_meta(self, meta: WorkerMeta):
         """
@@ -244,10 +256,13 @@ class Worker(WorkerHelper):
             duration = end_time - start_time
             assert method_name not in self.timing_data, method_name
             self.timing_data[method_name] = duration
+            wandb.log({method_name : duration})
             for k,v in kwargs:
                 name = method_name + '/' + k
                 assert name not in self.timing_data
                 self.timing_data[name] = v
+                wandb.log({name : v})
+
 
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
