@@ -26,6 +26,8 @@ import torch
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -67,6 +69,7 @@ class RayDAPOTrainer(RayPPOTrainer):
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
+            self._report_timing_stat()
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
@@ -117,7 +120,16 @@ class RayDAPOTrainer(RayPPOTrainer):
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
                             new_batch = new_batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(new_batch)
+                            #reward_baseline_tensor = self.reward_fn(new_batch)
+                            if not self.use_rm_worker:
+                                reward_baseline_tensor = self.reward_fn(new_batch)
+                            else:
+                                new_batch_padded, pad_size = pad_dataproto_to_divisor(new_batch, self.rm_worker_wg.world_size)
+                                reward_baseline_tensor = self.rm_worker_wg.compute_reward(new_batch_padded)
+                                reward_baseline_tensor = unpad_dataproto(reward_baseline_tensor, pad_size)
+                                reward_baseline_tensor = reward_baseline_tensor.batch['reward_tensor']
+                                self._report_timing_stat()
+
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
@@ -144,14 +156,24 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        try:
-                            reward_result = self.reward_fn(new_batch, return_dict=True)
-                            reward_tensor = reward_result["reward_tensor"]
-                            reward_extra_infos_dict = reward_result["reward_extra_info"]
-                        except Exception as e:
-                            print(f"Error in reward_fn: {e}")
-                            reward_tensor = self.reward_fn(new_batch)
-                            reward_extra_infos_dict = {}
+                        if not self.use_rm_worker:
+                            try:
+                                reward_result = self.reward_fn(new_batch, return_dict=True)
+                                reward_tensor = reward_result["reward_tensor"]
+                                reward_extra_infos_dict = reward_result["reward_extra_info"]
+                            except Exception as e:
+                                print(f"Error in reward_fn: {e}")
+                                reward_tensor = self.reward_fn(new_batch)
+                                reward_extra_infos_dict = {}
+                        else:
+                            new_batch_padded, pad_size = pad_dataproto_to_divisor(new_batch, self.rm_worker_wg.world_size)
+                            self._report_timing_stat()
+                            reward_proto = self.rm_worker_wg.compute_reward(new_batch_padded)
+                            reward_proto = unpad_dataproto(reward_proto, pad_size)
+                            reward_tensor = reward_proto.batch['reward_tensor']
+                            reward_extra_infos_dict = reward_proto.non_tensor_batch
+                            self._report_timing_stat()
+
 
                         new_batch.batch["token_level_scores"] = reward_tensor
 

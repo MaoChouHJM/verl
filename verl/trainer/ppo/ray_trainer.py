@@ -71,6 +71,8 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    RewardWorker = 7
+
 
 
 class AdvantageEstimator(str, Enum):
@@ -293,6 +295,7 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        self.use_rm_worker = Role.RewardWorker in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
 
@@ -619,7 +622,14 @@ class RayPPOTrainer:
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            result = self.val_reward_fn(test_batch, return_dict=True)
+            if not self.use_rm_worker:
+                result = self.val_reward_fn(test_batch, return_dict=True)
+            else:
+                test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch, self.rm_worker_wg.world_size)
+                result = self.rm_worker_wg.compute_val_reward(test_batch_padded)
+                result = unpad_dataproto(result, pad_size)
+                result = {**result.batch, 'rewrad_extra_info': result.non_tensor_batch}
+
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
@@ -697,6 +707,16 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
+        if self.use_rm_worker:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardWorker)
+            rm_worker_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardWorker],
+                                                  config=self.config,
+                                                  reward_fn=self.reward_fn,
+                                                  val_reward_fn=self.val_reward_fn)
+            self.resource_pool_to_cls[resource_pool]['rm_worker'] = rm_worker_cls
+
+
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -729,6 +749,9 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+        if self.use_rm_worker:
+            self.rm_worker_wg = all_wg['rm_worker']
+
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
@@ -906,6 +929,9 @@ class RayPPOTrainer:
         if self.use_rm:
             report_stat(self.rm_wg.get_timing_report())
 
+        if self.use_rm_worker:
+            report_stat(self.rm_worker_wg.get_timing_report())
+
         report_stat(self.actor_rollout_wg.get_timing_report())
 
     def fit(self):
@@ -980,7 +1006,15 @@ class RayPPOTrainer:
                             gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
                             batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
+                            #reward_baseline_tensor = self.reward_fn(batch)
+                            if not self.use_rm_worker:
+                                reward_baseline_tensor = self.reward_fn(batch, return_dict=False)
+                            else:
+                                batch_padded, pad_size = pad_dataproto_to_divisor(batch, self.rm_worker_wg.world_size)
+                                reward_baseline_tensor = self.rm_worker_wg.compute_reward(batch_padded)
+                                reward_baseline_tensor = unpad_dataproto(reward_baseline_tensor, pad_size)
+                                reward_baseline_tensor = reward_baseline_tensor.batch['reward_tensor']
+
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
@@ -1008,14 +1042,22 @@ class RayPPOTrainer:
 
                     with _timer("reward", timing_raw):
                         # compute reward model score
+                        reward_extra_infos_dict = {}
                         if self.use_rm:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
                             future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                        else:
+                        elif not self.use_rm_worker:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                        else:
+                            batch_padded, pad_size = pad_dataproto_to_divisor(batch, self.rm_worker_wg.world_size)
+                            reward_proto = self.rm_worker_wg.compute_reward(batch_padded)
+                            reward_proto = unpad_dataproto(reward_proto, pad_size)
+                            reward_tensor = reward_proto.batch['reward_tensor']
+                            reward_extra_infos_dict = reward_proto.non_tensor_batch
+
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):

@@ -81,7 +81,7 @@ class ActorRolloutRefWorker(Worker):
     """
 
     def __init__(self, config: DictConfig, role: str):
-        super().__init__()
+        super().__init__(config)
         self.config = config
         import torch.distributed
 
@@ -711,7 +711,7 @@ class ActorRolloutRefWorker(Worker):
 
 class CriticWorker(Worker):
     def __init__(self, config):
-        super().__init__()
+        super().__init__(config)
         import torch.distributed
 
         if not torch.distributed.is_initialized():
@@ -1048,7 +1048,7 @@ class RewardModelWorker(Worker):
     """
 
     def __init__(self, config):
-        super().__init__()
+        super().__init__(config)
         import torch.distributed
 
         if not torch.distributed.is_initialized():

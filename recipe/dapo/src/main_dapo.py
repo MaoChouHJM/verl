@@ -148,6 +148,11 @@ class TaskRunner:
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
 
+        if config.reward_model.enable_reward_workers:
+            from verl.workers.reward_workers import RewardWorker
+            role_worker_mapping[Role.RewardWorker] = ray.remote(RewardWorker)
+            mapping[Role.RewardWorker] = global_pool_id
+
         # reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
