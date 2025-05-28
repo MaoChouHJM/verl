@@ -127,8 +127,9 @@ class vLLMRollout(BaseRollout):
 
         limit_mm_per_prompt = None
         if config.get("limit_images", None):  # support for multi-image data
-            limit_mm_per_prompt = {"image": config.get("limit_images")}
+            limit_mm_per_prompt = {"image": config.get("limit_images"), "video": 0}
 
+        limit_mm_per_prompt = {"image": config.get("limit_images", 1), "video": 0}
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=True,

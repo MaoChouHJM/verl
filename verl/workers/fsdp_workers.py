@@ -22,6 +22,7 @@ import warnings
 import psutil
 import torch
 import torch.distributed
+import transformers
 from codetiming import Timer
 from omegaconf import DictConfig, open_dict
 from torch.distributed.device_mesh import init_device_mesh
@@ -86,7 +87,11 @@ class ActorRolloutRefWorker(Worker):
         import torch.distributed
 
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group()
+            rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+            torch.distributed.init_process_group(backend="cpu:gloo,cuda:nccl", rank=rank, world_size=world_size)
+
+        torch.distributed.barrier()
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
@@ -216,13 +221,28 @@ class ActorRolloutRefWorker(Worker):
             else:
                 actor_module_class = AutoModelForCausalLM
 
-            actor_module = actor_module_class.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=actor_model_config,
-                attn_implementation="flash_attention_2",
-                trust_remote_code=trust_remote_code,
-            )
+
+            from recovlm.models.keye.modeling_keye import KeyeForConditionalGeneration
+             
+            if isinstance(actor_model_config, transformers.models.Keye.configuration_keye.KeyeConfig):
+                actor_module_class = KeyeForConditionalGeneration
+
+
+            if actor_module_class != KeyeForConditionalGeneration:
+                actor_module = actor_module_class.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    attn_implementation="flash_attention_2",
+                    trust_remote_code=trust_remote_code,
+                )
+            else: 
+                actor_module = actor_module_class.from_pretrained(
+                    local_path,
+                    _attn_implementation="flash_attention_2",
+                    use_cache = False,
+                    ignore_mismatched_sizes=True
+                )
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -240,6 +260,16 @@ class ActorRolloutRefWorker(Worker):
 
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        # freeze visual tower
+        if self.config.actor.freeze_vision_tower:
+            if hasattr(actor_module, "visual"):
+                actor_module.visual.requires_grad_(False)
+                fsdp_config.use_orig_params = True
+                if self.rank == 0:
+                    print("Vision tower is set to not trainable.")
+            else:
+                if self.rank == 0:
+                    print("No vision tower found.")
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -279,14 +309,14 @@ class ActorRolloutRefWorker(Worker):
             actor_module,
             cpu_offload=cpu_offload,
             param_init_fn=init_fn,
-            use_orig_params=False,
+            use_orig_params=fsdp_config.use_orig_params,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
             mixed_precision=mixed_precision,
             sync_module_states=True,
             device_mesh=self.device_mesh,
-            forward_prefetch=False,
+            forward_prefetch=False
         )
 
         log_gpu_memory_usage("After Actor FSDP init", logger=logger)
@@ -296,7 +326,7 @@ class ActorRolloutRefWorker(Worker):
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
             actor_optimizer = optim.AdamW(
-                actor_module_fsdp.parameters(),
+                filter(lambda p: p.requires_grad, actor_module_fsdp.parameters()),
                 lr=optim_config.lr,
                 betas=optim_config.get("betas", (0.9, 0.999)),
                 weight_decay=optim_config.get("weight_decay", 1e-2),
@@ -344,7 +374,7 @@ class ActorRolloutRefWorker(Worker):
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager import BaseShardingManager
 
-            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout, tokenizer=self.tokenizer)
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
 
@@ -453,7 +483,7 @@ class ActorRolloutRefWorker(Worker):
             )
 
             # get the original unwrapped module
-            self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
+            #self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
 
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
@@ -513,6 +543,7 @@ class ActorRolloutRefWorker(Worker):
             with self.timing_record('update_actor/preprocess_data'):
                 data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
+
             with Timer(name="update_policy", logger=None) as timer, self.timing_record('update_actor/update_policy'):
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last

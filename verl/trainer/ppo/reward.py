@@ -48,6 +48,9 @@ def get_custom_reward_fn(config):
 
     reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
 
+    if reward_kwargs == {}:
+        return raw_fn
+
     def wrapped_fn(*args, **kwargs):
         return raw_fn(*args, **kwargs, **reward_kwargs)
 
@@ -72,6 +75,11 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
         from verl.workers.reward_manager import DAPORewardManager
 
         reward_manager_cls = DAPORewardManager
+    elif reward_manager_name == "keye":
+        from verl.workers.reward_manager import KeyeRewardManager
+
+        reward_manager_cls = KeyeRewardManager
+
     else:
         raise NotImplementedError
 

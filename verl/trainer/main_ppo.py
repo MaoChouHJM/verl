@@ -72,7 +72,16 @@ def run_ppo(config) -> None:
         # this is for local ray cluster
         ray.init(
             runtime_env={
-                "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}
+                "env_vars": {"TOKENIZERS_PARALLELISM": "true",
+                             "NCCL_DEBUG": "INFO",
+                             "NCCL_IB_DISABLE": "0",
+                             "NCCL_IB_GID_INDEX": "3",
+                             "NCCL_SOCKET_IFNAME": "eth",
+                             "NCCL_IB_HCA": "mlx5",
+                             "VLLM_LOGGING_LEVEL": "INFO",
+                             "TIMESTAMP": os.environ.get("TIMESTAMP", 'null'),
+                             "MONDB_PROJECT_NAME": os.environ.get("MONDB_PROJECT_NAME", 'none'),
+                             }
             },
             num_cpus=config.ray_init.num_cpus,
         )

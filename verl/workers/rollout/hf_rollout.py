@@ -35,10 +35,11 @@ __all__ = ["HFRollout"]
 
 
 class HFRollout(BaseRollout):
-    def __init__(self, module: nn.Module, config):
+    def __init__(self, module: nn.Module, config, tokenizer=None):
         super().__init__()
         self.config = config
         self.module = module
+        self.tokenizer= tokenizer
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
@@ -98,6 +99,7 @@ class HFRollout(BaseRollout):
             )
         # TODO: filter out the seq with no answers like ds-chat
         seq = output.sequences
+        output_ids = seq[0][len(idx[0]):].tolist()
 
         # huggingface generate will stop generating when all the batch reaches [EOS].
         # We have to pad to response_length
@@ -116,9 +118,12 @@ class HFRollout(BaseRollout):
 
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
-        delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        if position_ids.dim() == 3:  # qwen2vl mrope
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
 
-        response_position_ids = position_ids[:, -1:] + delta_position_id
+
+        response_position_ids = position_ids[..., -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
 
         response_attention_mask = get_response_mask(
@@ -141,4 +146,4 @@ class HFRollout(BaseRollout):
         torch.cuda.empty_cache()
 
         self.module.train()
-        return DataProto(batch=batch)
+        return DataProto(batch=batch, non_tensor_batch=prompts.non_tensor_batch)

@@ -194,7 +194,6 @@ class Worker(WorkerHelper):
         # wandb init
         timestamp = os.getenv('TIMESTAMP', 'null')
         project_name = os.getenv('MONDB_PROJECT_NAME', 'test')
-        print(f'hjm_dbg {timestamp=} {project_name=}')
         
         wandb.init(project=project_name, 
                    name=f'worker-{self.rank}',
