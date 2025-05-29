@@ -116,28 +116,28 @@ class Qwen3RLHFDataset(RLHFDataset):
         print(f"dataset len: {len(self.dataframe)}")
 
         # filter out too long prompts
-        #if self.filter_overlong_prompts:
-        #    tokenizer = self.qwen3_dataset.tokenizer
-        #    prompt_key = self.prompt_key
-        #    self.dataframe = self.dataframe.filter(
-        #        lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
-        #        <= self.max_prompt_length,
-        #        num_proc=self.num_workers,
-        #        desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
-        #    )
-
-        #    print(f"filter dataset len: {len(self.dataframe)}")
-
         if self.filter_overlong_prompts:
             tokenizer = self.qwen3_dataset.tokenizer
             prompt_key = self.prompt_key
             self.dataframe = self.dataframe.filter(
-                lambda doc: self.image_key in doc,
+                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
+                <= self.max_prompt_length,
                 num_proc=self.num_workers,
-                desc=f"Filtering prompts have {self.image_key}",
+                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
 
             print(f"filter dataset len: {len(self.dataframe)}")
+
+        #if self.filter_overlong_prompts:
+        #    tokenizer = self.qwen3_dataset.tokenizer
+        #    prompt_key = self.prompt_key
+        #    self.dataframe = self.dataframe.filter(
+        #        lambda doc: self.image_key in doc,
+        #        num_proc=self.num_workers,
+        #        desc=f"Filtering prompts have {self.image_key}",
+        #    )
+
+        #    print(f"filter dataset len: {len(self.dataframe)}")
 
 
     def resume_dataset_state(self):
@@ -228,11 +228,10 @@ class Qwen3RLHFDataset(RLHFDataset):
             multi_modal_data["video"] = [video.numpy() for video in videos]
 
         # here we pad fake image
-        #if images == None:
-        #    from PIL import Image
-        #    images = [Image.fromarray(np.zeros((50,50, 3), dtype=np.uint8)).convert("RGB")]
+        if images == None:
+            from PIL import Image
+            images = [Image.fromarray(np.zeros((50,50, 3), dtype=np.uint8)).convert("RGB")]
 
-#        print(f'{raw_prompt=},\n, {images=}')
         model_inputs = self.qwen3_dataset.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
 
         input_ids = model_inputs.pop("input_ids")

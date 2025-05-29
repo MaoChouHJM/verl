@@ -170,8 +170,8 @@ class ModelBaseAccuracy(object):
             list[float]: Reward scores
         """
         reward = 0.0
-        if swift_reward_type != "model_base":
-            return reward
+        #if swift_reward_type != "model_base":
+        #    return reward
         try:
             if prompt_type == "longcot":
                 content_match = re.search(r"<answer>(.*?)</answer>", cur_completion)
@@ -293,12 +293,13 @@ class MyFormat(object):
 
 class KeyeComputeReward(object):
     def __init__(self, **reward_kwargs):
+        print(f'{reward_kwargs=}', flush=True)
         self.reward_fns = []
         reward_fn_types = reward_kwargs.get("reward_fn_types", "")
         assert reward_fn_types != ""
         reward_fn_types = reward_fn_types.split(',')
         for reward_fn_type in reward_fn_types:
-            self.reward_fns.append(eval(reward_fn_type.strip())(reward_kwargs))
+            self.reward_fns.append(eval(reward_fn_type.strip())(**reward_kwargs))
         reward_sum_weights = reward_kwargs.get("reward_sum_weights",[1.0] * len(self.reward_fns))
         if isinstance(reward_sum_weights, str):
             reward_sum_weights = [float(x.strip()) for x in reward_sum_weights.split(',')]
@@ -306,15 +307,15 @@ class KeyeComputeReward(object):
         self.reward_sum_weights = reward_sum_weights
     
     def __call__(self, solution_str, ground_truth, **kwargs):
-        rewards = np.array([fn(solution_str, ground_truth, kwargs) for fn in self.reward_fns])
+        rewards = np.array([fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns])
         return np.dot(rewards, np.array(self.reward_sum_weights))
 
 
 if __name__ == "__main__":
-    kwargs={'swift_reward_type': 'model_base', 'prompt_type': 'instruct', 'messages': np.array([{'content': '\nQuestion:\nWithin quadrilateral ABCD, with midpoints E and F on sides AB and AD respectively, and EF = 6, BC = 13, and CD = 5, what is the area of triangle DBC?\nChoices:\nA: 60\nB: 30\nC: 48\nD: 65', 'role': 'user'}], dtype=object)}
+    kwargs={'swift_reward_type': 'model_base', 'prompt_type': 'longcot', 'messages': np.array([{'content': '\nQuestion:\nWithin quadrilateral ABCD, with midpoints E and F on sides AB and AD respectively, and EF = 6, BC = 13, and CD = 5, what is the area of triangle DBC?\nChoices:\nA: 60\nB: 30\nC: 48\nD: 65', 'role': 'user'}], dtype=object)}
     reward_cls = KeyeComputeReward(
         reward_fn_types="ModelBaseAccuracy,MyFormat",
         model_api_address="10.82.120.86",
         model_api_port="1222")
-    reward = reward_cls("Answer:B", "$B$", **kwargs)
+    reward = reward_cls("<think>this my thinking result.</think><answer>Answer:B</answer>", "$B$", **kwargs)
     print(reward)
