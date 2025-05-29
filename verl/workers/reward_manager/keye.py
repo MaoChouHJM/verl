@@ -17,8 +17,6 @@ from collections import defaultdict
 import torch
 
 from verl import DataProto
-#from verl.utils.reward_score import _default_compute_score
-from keye_reward import keye_compute_reward
 
 
 class KeyeRewardManager:
@@ -27,7 +25,8 @@ class KeyeRewardManager:
     def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
-        self.compute_score = compute_score or keye_compute_reward
+        self.compute_score = compute_score
+        assert self.compute_score != None
         self.reward_fn_key = reward_fn_key
 
     def __call__(self, data: DataProto, return_dict=False):

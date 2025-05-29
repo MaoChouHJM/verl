@@ -58,6 +58,7 @@ def get_custom_reward_fn(config):
 
 
 def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
+    compute_score = None
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
     if reward_manager_name == "naive":
         from verl.workers.reward_manager import NaiveRewardManager
@@ -79,11 +80,13 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
         from verl.workers.reward_manager import KeyeRewardManager
 
         reward_manager_cls = KeyeRewardManager
-
+        from keye_reward import KeyeComputeReward
+        compute_score = KeyeComputeReward(**reward_kwargs)
     else:
         raise NotImplementedError
 
-    compute_score = get_custom_reward_fn(config)
+    if compute_score == None:   
+        compute_score = get_custom_reward_fn(config)
     return reward_manager_cls(
         tokenizer=tokenizer,
         num_examine=num_examine,
