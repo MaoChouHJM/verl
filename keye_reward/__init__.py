@@ -3,6 +3,7 @@ import re
 from typing import Dict, List, Union
 
 import json
+import numpy as np
 
 import asyncio
 import httpx
@@ -52,7 +53,7 @@ class Singleton(object):
 
 async def llm_openai_api(
     messages,
-    ip="10.82.120.86",
+    ip="127.0.0.1",
     host="1222",
     temperature=0.7,
     max_tokens=2048,
@@ -93,15 +94,15 @@ async def llm_openai_api(
             return [choice["message"]["content"] for choice in response_data["choices"]]
 
 
-class compute_model_base_reward(Singleton):
-    def __init__(self):
+class ModelBaseAccuracy(object):
+    def __init__(self, **reward_kwargs):
         self.rank = int(os.getenv("RANK", -1))
         self.world_size = int(os.getenv("WORLD_SIZE", 1))
         self.api_address_list = list(
-            map(str, os.getenv("MODEL_API_ADDRESS", "10.82.120.86").split(","))
+            map(str, reward_kwargs.get("model_api_address", "127.0.0.1").split(","))
         )
         self.api_port_list = list(
-            map(int, os.getenv("MODEL_API_PORT", "1222").split(","))
+            map(int, reward_kwargs.get("model_api_port", "1222").split(","))
         )
         self.loop = asyncio.get_event_loop()
 
@@ -223,58 +224,97 @@ class compute_model_base_reward(Singleton):
 
 
 
+class MyMathAccuracy(object):
+    def __init__(self, **reward_kwargs):
+        pass
 
-def compute_math_reward(completion, solution_str, **kwargs) -> float:
-    swift_reward_type = kwargs.get("swift_reward_type", "rule_base")
-    pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
-    match = re.match(pattern, completion, re.DOTALL | re.MULTILINE)
-    gold_parsed = parse(
-        solution_str,
-        extraction_mode="first_match",
-        extraction_config=[LatexExtractionConfig()],
-    )
-    if not match or swift_reward_type == "model_base":
-        reward = 0.0
-    else:
-        if len(gold_parsed) != 0:
-            content_match = re.search(r"<answer>(.*?)</answer>", content)
-            student_answer = (
-                content_match.group(1).strip()
-                if content_match
-                else content.strip()
-            )
-            # We require the answer to be provided in correct latex (no malformed operators)
-            answer_parsed = parse(
-                "<answer>" + student_answer + "</answer>",
-                extraction_config=[
-                    LatexExtractionConfig(
-                        normalization_config=NormalizationConfig(
-                            nits=False,
-                            malformed_operators=False,
-                            basic_latex=True,
-                            equations=True,
-                            boxed=True,
-                            units=True,
-                        ),
-                        # Ensures that boxed is tried first
-                        boxed_match_priority=0,
-                        try_extract_without_anchor=False,
-                    )
-                ],
-                extraction_mode="first_match",
-            )
-            # Reward 1 if the content is the same as the ground truth, 0 otherwise
-            reward = float(verify(answer_parsed, gold_parsed))
+    def __call__(self, completion, solution_str, **kwargs) -> float:
+        swift_reward_type = kwargs.get("swift_reward_type", "rule_base")
+        pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
+        match = re.match(pattern, completion, re.DOTALL | re.MULTILINE)
+        gold_parsed = parse(
+            solution_str,
+            extraction_mode="first_match",
+            extraction_config=[LatexExtractionConfig()],
+        )
+        if not match or swift_reward_type == "model_base":
+            reward = 0.0
         else:
-            # If the gold solution is not parseable, we reward 1 to skip this example
-            reward = 1.0
-    return reward
+            if len(gold_parsed) != 0:
+                content_match = re.search(r"<answer>(.*?)</answer>", completion)
+                student_answer = (
+                    content_match.group(1).strip()
+                    if content_match
+                    else completion.strip()
+                )
+                # We require the answer to be provided in correct latex (no malformed operators)
+                answer_parsed = parse(
+                    "<answer>" + student_answer + "</answer>",
+                    extraction_config=[
+                        LatexExtractionConfig(
+                            normalization_config=NormalizationConfig(
+                                nits=False,
+                                malformed_operators=False,
+                                basic_latex=True,
+                                equations=True,
+                                boxed=True,
+                                units=True,
+                            ),
+                            # Ensures that boxed is tried first
+                            boxed_match_priority=0,
+                            try_extract_without_anchor=False,
+                        )
+                    ],
+                    extraction_mode="first_match",
+                )
+                # Reward 1 if the content is the same as the ground truth, 0 otherwise
+                reward = float(verify(answer_parsed, gold_parsed))
+            else:
+                # If the gold solution is not parseable, we reward 1 to skip this example
+                reward = 1.0
+        return reward
+
+class MyFormat(object):
+    def __init__(self, **reward_kwargs):
+        pass
+
+    def __call__(self, completion, solution_str, **kwargs) -> float:
+        """Reward function that checks if the completion has a specific format."""
+        prompt_type = kwargs.get("prompt_type", "instruct")
+        swift_reward_types = kwargs.get(
+            "swift_reward_type", "model_base")
+        pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
+        match =  (re.match(pattern, completion, re.DOTALL | re.MULTILINE)
+                  if prompt_type == "longcot"  # longcot
+                  else not re.match(pattern, completion, re.DOTALL | re.MULTILINE))
+        
+        return 0.0 if match else -1.0
 
 
-def keye_compute_reward(data_source, solution_str, ground_truth, **kwargs):
-    if data_source == "model_base":
-        return compute_model_base_reward()(solution_str, ground_truth, **kwargs)
-    elif data_source == "rule_base":
-        return compute_math_reward(solution_str, ground_truth, **kwargs)
-    else:
-        raise NotImplementedError(f'keye_compute_reward : not implemented for {data_source}')
+class KeyeComputeReward(object):
+    def __init__(self, **reward_kwargs):
+        self.reward_fns = []
+        reward_fn_types = reward_kwargs.get("reward_fn_types", "")
+        assert reward_fn_types != ""
+        reward_fn_types = reward_fn_types.split(',')
+        for reward_fn_type in reward_fn_types:
+            self.reward_fns.append(eval(reward_fn_type.strip())(reward_kwargs))
+        reward_sum_weights = reward_kwargs.get("reward_sum_weights",[1.0] * len(self.reward_fns))
+        if isinstance(reward_sum_weights, str):
+            reward_sum_weights = [float(x.strip()) for x in reward_sum_weights.split(',')]
+        assert len(reward_sum_weights) == len(self.reward_fns)
+        self.reward_sum_weights = reward_sum_weights
+    
+    def __call__(self, solution_str, ground_truth, **kwargs):
+        rewards = np.array([fn(solution_str, ground_truth, kwargs) for fn in self.reward_fns])
+        return np.dot(rewards, np.array(self.reward_sum_weights))
+
+
+if __name__ == "__main__":
+    kwargs={'swift_reward_type': 'model_base', 'prompt_type': 'instruct', 'messages': np.array([{'content': '\nQuestion:\nWithin quadrilateral ABCD, with midpoints E and F on sides AB and AD respectively, and EF = 6, BC = 13, and CD = 5, what is the area of triangle DBC?\nChoices:\nA: 60\nB: 30\nC: 48\nD: 65', 'role': 'user'}], dtype=object)}
+    reward_cls = KeyeComputeReward(
+        reward_fn_types="ModelBaseAccuracy,MyFormat",
+        model_api_address="10.82.120.86",
+        model_api_port="1222")
+    reward = reward_cls("Answer:B", "$B$", **kwargs)
+    print(reward)
