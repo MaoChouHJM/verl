@@ -1,36 +1,29 @@
 set -x
 ENGINE=${1:-vllm}
-# If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
-# export VLLM_ATTENTION_BACKEND=XFORMERS
 export http_proxy=http://oversea-squid1.jp.txyun:11080 https_proxy=http://oversea-squid1.jp.txyun:11080 no_proxy=localhost,127.0.0.1,localaddress,localdomain.com,internal,corp.kuaishou.com,test.gifshow.com,staging.kuaishou.com 
 export NCCL_DEBUG=INFO
 export NCCL_IB_DISABLE=0
 export NCCL_IB_GID_INDEX=3
 export NCCL_SOCKET_IFNAME=eth
 export NCCL_IB_HCA=mlx5
+# 使用自己的wandb_api_key
 export WANDB_API_KEY=173c259f71eff84cef8c20b35fcdfa0aff803073
 
 wandb online
 
+# 下面的路径记得修改为自己的
 HOME=/nlp_group/huangjiaming
-
-# env json
 project_name='verl_grpo_keye_8node'
 exp_name='hjm_test'
 
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
+# 务必保留,用于分布式group打点做区分
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 runtime_env_json="{\"env_vars\": {\"TIMESTAMP\":\"${timestamp}\", \"MONDB_PROJECT_NAME\": \"${project_name}\"}}"
 
 export TIMESTAMP=${timestamp}
 export MONDB_PROJECT_NAME=${project_name}
 export HYDRA_FULL_ERROR=1
-
-
-
-#    custom_reward_function.path=$HOME/kai-verl/keye_reward/__init__.py \
-#    custom_reward_function.name=keye_compute_reward \
-
 
 
 /opt/conda/envs/py310/bin/python3 -m verl.trainer.main_ppo \
