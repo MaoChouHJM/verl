@@ -67,7 +67,8 @@ def get_sharding_strategy(device_mesh):
     from torch.distributed.fsdp import ShardingStrategy
 
     if device_mesh.ndim == 1:
-        sharding_strategy = ShardingStrategy.FULL_SHARD
+       # sharding_strategy = ShardingStrategy.FULL_SHARD
+        sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
     elif device_mesh.ndim == 2:
         sharding_strategy = ShardingStrategy.HYBRID_SHARD
     else:
@@ -312,7 +313,7 @@ class ActorRolloutRefWorker(Worker):
             use_orig_params=fsdp_config.use_orig_params,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
-            sharding_strategy=sharding_strategy,  # zero3
+            sharding_strategy=sharding_strategy,  # zero2
             mixed_precision=mixed_precision,
             sync_module_states=True,
             device_mesh=self.device_mesh,

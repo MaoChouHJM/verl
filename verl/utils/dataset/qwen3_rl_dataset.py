@@ -99,9 +99,13 @@ class Qwen3RLHFDataset(RLHFDataset):
         # whether to store the dataset in state_dict()
         # default not store
         self.serialize_dataset = False
-        with open(config['hf_dataset_config'], encoding="utf-8") as f:
-            import json
-            dataset_config = json.loads(f.read())
+        dataset_config = {"sources": "",
+                          "num_workers": 8,
+                          "base_model_dir": config['base_model_dir']
+                         }
+        #with open(config['hf_dataset_config'], encoding="utf-8") as f:
+        #    import json
+        #    dataset_config = json.loads(f.read())
         self.qwen3_dataset = SkipBuildSourceDataset(**dataset_config) 
         self._read_files_and_tokenize()
 
@@ -155,9 +159,10 @@ class Qwen3RLHFDataset(RLHFDataset):
     def _build_messages(self, example: dict):
         messages: list = example.pop(self.prompt_key)
 
-        if self.image_key in example or self.video_key in example:
+        if (self.image_key in example and example[self.image_key] != None) or (self.video_key in example and example[self.video_key] != None):
             image_idx = 0
             video_idx = 0
+            #print(f'{example=}', flush=True)
             for message in messages:
                 content = message["content"]
                 content_list = []
@@ -179,8 +184,11 @@ class Qwen3RLHFDataset(RLHFDataset):
                     role = message["role"]
                     if role == "user":
                         if self.image_key in example:
-                            for idx, image_path in enumerate(example[self.image_key]):
-                                message["content"].insert(0+ idx, {"type": "image", "image": image_path})
+                            try:
+                                for idx, image_path in enumerate(example[self.image_key]):
+                                    message["content"].insert(0+ idx, {"type": "image", "image": image_path})
+                            except Exception as e:
+                                raise ValueError(f'{example=}')
 
                         if self.video_key in example:
                             for idx, video_path in enumerate(example[self.video_key]):

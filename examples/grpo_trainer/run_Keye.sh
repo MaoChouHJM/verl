@@ -13,7 +13,7 @@ wandb online
 
 # 下面的路径记得修改为自己的
 HOME=/nlp_group/huangjiaming
-project_name='verl_grpo_keye_8node_for_long_cot'
+project_name='verl_grpo_keye_8node_for_long_cot_full'
 exp_name='hjm_test'
 
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
@@ -27,30 +27,32 @@ export HYDRA_FULL_ERROR=1
 
 
 /opt/conda/envs/py310/bin/python3 -m verl.trainer.main_ppo \
+    ++user_custom_env.MIN_PIXELS=1024 \
+    ++user_custom_env.MAX_PIXELS=1310720 \
     algorithm.adv_estimator=grpo \
     data.custom_cls.name=Qwen3RLHFDataset \
     data.custom_cls.path=$HOME/kai-verl/verl/utils/dataset/qwen3_rl_dataset.py \
-    ++data.hf_dataset_config=/llm_reco/lingzhixin/recovlm_qw0510/recovlm/examples/vlm/keye/debug_keye_8B256.json \
-    data.train_files=$HOME/kai-verl/long_cot.parquet \
+    ++data.base_model_dir=/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/20250528.CoT_Mix_tianke_v3.from_mpo_v1_from_19083/output/v1-20250528-213601/checkpoint-5154 \
+    data.train_files=[$HOME/kai-verl/dataset_MMPR_K12_nn_addTokenLen__mmpr1.1_minlen30_sample5w__fixsystem__instuctnothink__new_think_token__fixnothink.parquet,$HOME/kai-verl/OpenR1_Math_220k_rule_long_cot_new_think_token.parquet] \
     data.val_files=$HOME/kai-verl/single.parquet \
     data.train_batch_size=192 \
     ++data.dataloader_num_workers=8 \
     data.max_prompt_length=5120 \
     data.max_response_length=3072 \
-    data.filter_overlong_prompts=True \
+    data.filter_overlong_prompts=False \
     data.truncation='error' \
     data.prompt_key=messages \
     data.image_key=images \
     data.reward_fn_key=swift_reward_type \
-    actor_rollout_ref.model.path=/nlp_group/huangjiaming/20250519 \
+    actor_rollout_ref.model.path=/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/20250528.CoT_Mix_tianke_v3.from_mpo_v1_from_19083/output/v1-20250528-213601/checkpoint-5154 \
     ++actor_rollout_ref.actor.freeze_vision_tower=True \
     actor_rollout_ref.actor.optim.lr=5e-7 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.01 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
     actor_rollout_ref.actor.optim.warmup_style=cosine \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=192 \
     actor_rollout_ref.actor.ppo_epochs=2 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
@@ -78,8 +80,8 @@ export HYDRA_FULL_ERROR=1
     algorithm.use_kl_in_reward=False \
     reward_model.reward_manager=keye \
     ++reward_model.reward_kwargs.reward_fn_types=\'ModelBaseAccuracy,MyFormat\' \
-    ++reward_model.reward_kwargs.model_api_address=\'10.82.120.86\' \
-    ++reward_model.reward_kwargs.model_api_port=\'1222\' \
+    ++reward_model.reward_kwargs.model_api_address=\'10.82.121.34,10.82.122.98,10.82.120.218\' \
+    ++reward_model.reward_kwargs.model_api_port=\'8000\' \
     ++reward_model.enable_reward_workers=True \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \

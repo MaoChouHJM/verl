@@ -68,6 +68,8 @@ def run_ppo(config) -> None:
     # TODO(linjunrong.ocss884): this ENV is left for resolving SGLang conflict with ray devices
     # isolation, will solve in the future
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    user_custom_env = config.get("user_custom_env", {})
+    print(f"{user_custom_env=}")
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
@@ -81,7 +83,7 @@ def run_ppo(config) -> None:
                              "VLLM_LOGGING_LEVEL": "INFO",
                              "TIMESTAMP": os.environ.get("TIMESTAMP", 'null'),
                              "MONDB_PROJECT_NAME": os.environ.get("MONDB_PROJECT_NAME", 'none'),
-                             }
+                             }.update(user_custom_env)
             },
             num_cpus=config.ray_init.num_cpus,
         )
