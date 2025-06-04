@@ -122,7 +122,7 @@ class vLLMRollout(BaseRollout):
                              please increase max_num_batched_tokens or disable chunked prefill"
             )
 
-        trust_remote_code = kwargs.get("trust_remote_code", False)
+        trust_remote_code = kwargs.get("trust_remote_code", True)
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
 
         limit_mm_per_prompt = None
@@ -148,7 +148,7 @@ class vLLMRollout(BaseRollout):
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
-            trust_remote_code=trust_remote_code,
+            trust_remote_code=True,
             seed=config.get("seed", 0),
         )
 

@@ -320,6 +320,8 @@ class ActorRolloutRefWorker(Worker):
             forward_prefetch=False
         )
 
+        actor_module_fsdp.processor = self.processor
+
         log_gpu_memory_usage("After Actor FSDP init", logger=logger)
 
         # TODO: add more optimizer args into config

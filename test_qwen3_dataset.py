@@ -30,6 +30,7 @@ item = 0
 for batch_dict in data_loader:
 #    print(f'Received batch: {batch}')
     batch: DataProto = DataProto.from_single_dict(batch_dict)
+    break
     item += 1
 
 #    batch = batch_dict

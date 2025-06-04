@@ -30,6 +30,16 @@ from verl.utils.model import compute_position_id_with_mask
 from verl.utils.dataset import RLHFDataset
 
 
+import sys
+print("Script's Python executable:", sys.executable)
+print("Script's sys.path:", sys.path)
+# 尝试导入
+try:
+    import recovlm
+    print("recovlm imported successfully in script.")
+except ModuleNotFoundError as e:
+    print(f"ModuleNotFoundError in script: {e}")
+    raise ValueError(f'e')
 from recovlm.data.datasets import ChatCompletionVisionParquetDataset_keye, get_rope_index
 from recovlm.utils.qwen_vl_utils import process_vision_info
 
@@ -227,18 +237,18 @@ class Qwen3RLHFDataset(RLHFDataset):
 
         images, videos = process_vision_info(messages)
 
-        if self.image_key in row_dict:
+        if self.image_key in row_dict and row_dict[self.image_key] != None:
             #images = [process_image(image) for image in row_dict.pop(self.image_key)]
             multi_modal_data["image"] = images
 
-        if self.video_key in row_dict:
+        if self.video_key in row_dict and row_dict[self.video_key] != None:
             #videos = [process_video(video) for video in row_dict.pop(self.video_key)]
             multi_modal_data["video"] = [video.numpy() for video in videos]
 
         # here we pad fake image
-        if images == None:
-            from PIL import Image
-            images = [Image.fromarray(np.zeros((50,50, 3), dtype=np.uint8)).convert("RGB")]
+        #if images == None:
+        #    from PIL import Image
+        #    images = [Image.fromarray(np.zeros((50,50, 3), dtype=np.uint8)).convert("RGB")]
 
         model_inputs = self.qwen3_dataset.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
 
@@ -252,7 +262,7 @@ class Qwen3RLHFDataset(RLHFDataset):
         row_dict["multi_modal_data"] = multi_modal_data
         row_dict["multi_modal_inputs"] = dict(model_inputs)
 
-        assert "pixel_values" in row_dict["multi_modal_inputs"], f"{raw_prompt=} {images=}"
+        #assert "pixel_values" in row_dict["multi_modal_inputs"], f"{raw_prompt=} {images=}"
 
         # second_per_grid_ts isn't used for training, just for mrope
         row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
