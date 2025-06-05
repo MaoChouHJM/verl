@@ -244,6 +244,7 @@ class ActorRolloutRefWorker(Worker):
                     use_cache = False,
                     ignore_mismatched_sizes=True
                 )
+                actor_module.processor = self.processor
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch

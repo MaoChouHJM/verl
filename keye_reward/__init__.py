@@ -27,19 +27,47 @@ from math_verify import LatexExtractionConfig, parse, verify
 # - Respond with **’No’** if the answer is wrong.
 # Only respond with a single word Yes or No."""
 
-prompt_template = """You are given a question, the correct ground truth answer, and a candidate answer.
-### Question
-{{question}}
-### Ground Truth Answer
-{{real_answer}}
-### Candidate Answer
-{{model_answer}}
-## Task
-- Determine whether the candidate answer is factually correct and fully consistent with the ground truth answer.
-- Respond with:
-    - Yes — if the candidate answer is correct.
-    - No — if the candidate answer is incorrect.
-- Output only a single word: Yes or No. Do not provide any explanation."""
+prompt_template = """
+You are a expert assistant. I have a question, and a model will respond based on the question and the image provided (you can not see image here). 
+The model will first output its thought process, followed by the final answer. I need your help to evaluate the correctness of the model's output and its thought process.
+Though you can not see the provided image, I will provide the ground truth for your reference. 
+
+#### Question: \n{Question}\n\n
+#### Ground Truth: \n{Ground_Truth}\n\n
+#### Model Thought Process: \n{Model_Thought_Process}\n\n
+#### Model Output: \n{Model_Output}\n\n
+
+Please provide your evaluation based on the following criteria:
+1. Is the thought process related to the question? If the model's thought process contains very irrelevant information, please mark it as "Unrelated".
+2. Is the model's output correct based on the ground truth? If the model's output is correct, please mark it as "Yes". Otherwise, please mark it as "No".
+3. Evaluate the quality of the thought process. If the thought process is well-structured, logical, and comprehensive, mark it as "High". If it is somewhat logical but lacks details or has minor flaws, mark it as "Medium". If it is poorly structured or contains significant errors, mark it as "Low".
+4. You fisrt need to read the question and the ground truth, then read the model's thought process and output.
+5. Before you provide your evaluation, please give a brief comment to help us understand your evaluation better.
+6. Output your evaluation in the json format: 
+```
+{
+    "Comments": "Your brief comment.",
+    "Correctness": "Yes/No",
+    "Thought_Process": "Related/Unrelated",
+    "Thought_Process_Quality": "High/Medium/Low"
+}
+```
+"""
+
+
+#prompt_template = """You are given a question, the correct ground truth answer, and a candidate answer.
+#### Question
+#{{question}}
+#### Ground Truth Answer
+#{{real_answer}}
+#### Candidate Answer
+#{{model_answer}}
+### Task
+#- Determine whether the candidate answer is factually correct and fully consistent with the ground truth answer.
+#- Respond with:
+#    - Yes — if the candidate answer is correct.
+#    - No — if the candidate answer is incorrect.
+#- Output only a single word: Yes or No. Do not provide any explanation."""
 
 
 class Singleton(object):
@@ -57,7 +85,7 @@ async def llm_openai_api(
     host="1222",
     temperature=0.7,
     max_tokens=2048,
-    top_p=0.7,
+    top_p=0.8,
     openai_api_key="EMPTY",
     n=1,  # from lxy
 ):
@@ -123,31 +151,40 @@ class ModelBaseAccuracy(object):
 
     async def async_call(self, completions, solution_str, **kwargs) -> float:
         # NOTE(huangjiaming): completions  batch_size = 1
-        message = kwargs.get("messages", [])
-        if_longcot = message[0]["role"] == "system"
+        messages = kwargs.get("messages", [])
+        if_longcots = [m[0]["role"] == "system" for m in messages]
         #if_longcots = [m[0]["role"] == "system" for m in messages]
-        question = message[1]["content"] if if_longcot else message[0]["content"]
-        prompt_type = kwargs.get("prompt_type", "")
+        questions = [m[1]["content"] if if_longcot else m[0]["content"] for m, if_longcot in zip(messages, if_longcots)]
+        prompt_types = kwargs.get("prompt_type", ["instruct"] * len(completions))
 
-        swift_reward_type = kwargs.get("swift_reward_type", "")
-        length = 1
+        swift_reward_types = kwargs.get("swift_reward_type", ["model_base"] * len(completions))
+        length = len(completions)
         tasks = []
-        cur_address = self.api_address_list[
-            (self.rank * length) % len(self.api_address_list)
-        ]
-        cur_port = self.api_port_list[
-            (self.rank * length) % len(self.api_port_list)
-        ]
-        reward = asyncio.create_task(
-            self.evaluate(
-                completions, solution_str, question, cur_address, cur_port, swift_reward_type, prompt_type
+        for cur_idx, (
+            content,
+            sol,
+            question,
+            swift_reward_type,
+            prompt_type,
+        ) in enumerate(
+            zip(completions, solution_str, questions, swift_reward_types, prompt_types)):
+            cur_address = self.api_address_list[
+                (self.rank * length + cur_idx) % len(self.api_address_list)
+            ]
+            cur_port = self.api_port_list[
+                (self.rank * length + cur_idx) % len(self.api_port_list)
+            ]
+            reward = asyncio.create_task(
+                self.evaluate(
+                    content, sol, question, cur_address, cur_port, swift_reward_type, prompt_type
+                )
             )
-        )
-        tasks.append(reward)
+            tasks.append(reward)
         rewards = await asyncio.gather(*tasks)
         # only need float reward
-        reward = rewards[0]
-        return reward
+        #reward = rewards[0]
+        return rewards
+
 
     async def evaluate(
         self,
@@ -169,27 +206,41 @@ class ModelBaseAccuracy(object):
         Returns:
             list[float]: Reward scores
         """
+        # hardcode model_base
+        swift_reward_type="model_base"
         reward = 0.0
-        #if swift_reward_type != "model_base":
-        #    return reward
+        # if swift_reward_type != "model_base":
+        #     return reward
         try:
             if prompt_type == "longcot":
-                content_match = re.search(r"<answer>(.*?)</answer>", cur_completion)
-                student_answer = (
-                    content_match.group(1).strip()
-                    if content_match
-                    else cur_completion.strip()
+                # longcot 格式错误直接返回 0
+                pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
+                match = re.match(pattern, cur_completion, re.DOTALL | re.MULTILINE)
+                if not match:
+                    return reward
+                think_match = re.search(
+                    r"<think>(.*?)</think>", cur_completion, re.DOTALL | re.MULTILINE
                 )
-                cur_completion = student_answer
-            
+                answer_match = re.search(
+                    r"<answer>(.*?)</answer>", cur_completion, re.DOTALL | re.MULTILINE
+                )
+                if not think_match or not answer_match:
+                    return reward
+                think_content = think_match.group(1).strip()
+                answer_content = answer_match.group(1).strip()
+            else:
+                think_content = ""
+                answer_content = cur_completion
+
             prompt = (
-                prompt_template.replace("{{question}}", question)
-                .replace("{{real_answer}}", cur_solution)
-                .replace("{{model_answer}}", cur_completion)
+                prompt_template.replace("{Question}", question)
+                .replace("{Ground_Truth}", cur_solution)
+                .replace("{Model_Thought_Process}", think_content)
+                .replace("{Model_Output}", answer_content)
             )
             messages = [{"role": "user", "content": prompt}]
-            max_try = 50
-            for _ in range(max_try):
+            max_try = 30
+            for i in range(max_try):
                 try:
                     completion = await llm_openai_api(
                         messages, ip=cur_address, host=cur_port
@@ -197,6 +248,22 @@ class ModelBaseAccuracy(object):
                     completion = (
                         completion[0] if isinstance(completion, list) else completion
                     )
+                    
+                    # # print(f'lcy0318-completion-{prompt}-{completion}')
+                    # json_str = completion[
+                    #     completion.rfind("{") : completion.rfind("}") + 1
+                    # ]
+                    # json_str = json_str.replace("\\", "\\\\")
+                    # completion = json.loads(json_str)
+                    
+                    pattern = r'\{\s*[^{}]*"Comments":.*?"\n\}'
+                    json_strings = re.findall(pattern, completion, re.DOTALL)
+                    json_str = json_strings[-1]
+                    try:
+                        completion = json.loads(json_str)
+                    except:
+                        completion = eval(json_str)
+
                     try:
                         with open(
                             f"./plugin_completion_log/rank{self.rank}.jsonl",
@@ -211,17 +278,40 @@ class ModelBaseAccuracy(object):
                             f.flush()
                     except:
                         pass
+                    
+                    correctness = completion["Correctness"]
+                    thought_process = completion["Thought_Process"]
+                    thought_Process_quality = completion["Thought_Process_Quality"] # "High/Medium/Low"
                     break
                 except Exception as e:
-                    print(f"xx-{e}")
-                    print(dump_data)
+                    print(f"xx-retry_{i}-{e}")
+                    try:
+                        print(completion)
+                    except:
+                        pass
                     continue
-            if completion.lower() == "yes":
-                reward = 1.0
+            if prompt_type == "longcot":
+                if (
+                    correctness.lower() == "yes"
+                    and thought_process.lower() == "related"
+                ):
+                    if swift_reward_type == "model_base":
+                        reward += 1.0
+                elif thought_process.lower() == "unrelated":
+                    reward -= 0.5
+                if thought_Process_quality.lower() == "medium":
+                    reward -= 0.3
+                elif thought_Process_quality.lower() == "low":
+                    reward -= 0.8
+                # 最低 -1.0
+                reward = max(-1.0, reward)
+            else:
+                if correctness.lower() == "yes":
+                    if swift_reward_type == "model_base":
+                        reward += 1.0
         except Exception as e:
             print(e)
         return reward
-
 
 
 class MyMathAccuracy(object):
@@ -280,15 +370,16 @@ class MyFormat(object):
 
     def __call__(self, completion, solution_str, **kwargs) -> float:
         """Reward function that checks if the completion has a specific format."""
-        prompt_type = kwargs.get("prompt_type", "instruct")
+        prompt_types = kwargs.get("prompt_type", ["instruct"] * len(completion))
         swift_reward_types = kwargs.get(
-            "swift_reward_type", "model_base")
+            "swift_reward_type", ["model_base"] * len(completion))
         pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
-        match =  (re.match(pattern, completion, re.DOTALL | re.MULTILINE)
+        matches =  [(re.match(pattern, content, re.DOTALL | re.MULTILINE)
                   if prompt_type == "longcot"  # longcot
-                  else not re.match(pattern, completion, re.DOTALL | re.MULTILINE))
+                  else not re.match(pattern, content, re.DOTALL | re.MULTILINE))
+                  for content, prompt_type in zip(completion, prompt_types)]
         
-        return 0.0 if match else -1.0
+        return [0.0 if match else -1.0 for match in matches]
 
 
 class KeyeComputeReward(object):
@@ -307,15 +398,21 @@ class KeyeComputeReward(object):
         self.reward_sum_weights = reward_sum_weights
     
     def __call__(self, solution_str, ground_truth, **kwargs):
-        rewards = np.array([fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns])
-        return np.dot(rewards, np.array(self.reward_sum_weights))
+        #rewards = np.array([fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns])
+        rewards = list(zip(*[fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns]))
+        print(f"{rewards=}")
+        return [np.dot(reward, np.array(self.reward_sum_weights)) for reward in rewards]
 
 
 if __name__ == "__main__":
-    kwargs={'swift_reward_type': 'model_base', 'prompt_type': 'longcot', 'messages': np.array([{'content': '\nQuestion:\nWithin quadrilateral ABCD, with midpoints E and F on sides AB and AD respectively, and EF = 6, BC = 13, and CD = 5, what is the area of triangle DBC?\nChoices:\nA: 60\nB: 30\nC: 48\nD: 65', 'role': 'user'}], dtype=object)}
+    kwargs={'swift_reward_type': ['model_base', 'model_base'],
+            'prompt_type': ['longcot', 'longcot'], 
+            'messages': [np.array([{'content': '\nQuestion:\n<image [1]> Question: Add 6 matte cylinders. How many matte cylinders are left?/think', 'role': 'user'}], dtype=object),
+                         np.array([{'content': '\nQuestion:\nWithin quadrilateral ABCD, with midpoints E and F on sides AB and AD respectively, and EF = 6, BC = 13, and CD = 5, what is the area of triangle DBC?\nChoices:\nA: 60\nB: 30\nC: 48\nD: 65', 'role': 'user'}], dtype=object)]}
     reward_cls = KeyeComputeReward(
         reward_fn_types="ModelBaseAccuracy,MyFormat",
-        model_api_address="10.82.120.86",
-        model_api_port="1222")
-    reward = reward_cls("<think>this my thinking result.</think><answer>Answer:B</answer>", "$B$", **kwargs)
+        model_api_address="10.82.121.34,10.82.122.98,10.82.120.218",
+        model_api_port="8000")
+    reward = reward_cls(["<think>The problem that users need to solve now is calculating the number of original matte cylinders after adding 6 more. First, let's look at the matte cylinders in the scene: there are two in the original image, one gray large cylinder and one red small cylinder. Then, add 6 more, so the total is 2 + 6 = 8. It is necessary to confirm whether the count of original matte cylinders is correct. Look at each object:\nGray large cylinder: matte\nRed small cylinder: matte\nSo originally there were 2, then add 6, resulting in a total of 8.</think><answer>\boxed{8}</answer>",
+                         "<think>this my thinking result.</think><answer>B</answer>"], ["$8$", "$B$"], **kwargs)
     print(reward)

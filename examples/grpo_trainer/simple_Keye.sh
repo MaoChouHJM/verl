@@ -16,7 +16,7 @@ wandb online
 
 # 下面的路径记得修改为自己的
 HOME=/nlp_group/huangjiaming
-project_name='verl_grpo_keye_8node_for_long_cot_full'
+project_name='verl_grpo_keye_8node_for_long_cot_full_simple'
 exp_name='hjm_test'
 
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
@@ -38,7 +38,7 @@ export HYDRA_FULL_ERROR=1
     ++data.base_model_dir=/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/20250528.CoT_Mix_tianke_v3.from_mpo_v1_from_19083/output/v1-20250528-213601/checkpoint-5154 \
     data.train_files=[$HOME/kai-verl/dataset_MMPR_K12_nn_addTokenLen__mmpr1.1_minlen30_sample5w__fixsystem__instuctnothink__new_think_token__fixnothink.parquet,$HOME/kai-verl/OpenR1_Math_220k_rule_long_cot_new_think_token.parquet] \
     data.val_files=$HOME/kai-verl/single.parquet \
-    data.train_batch_size=64 \
+    data.train_batch_size=8 \
     ++data.dataloader_num_workers=8 \
     data.max_prompt_length=5120 \
     data.max_response_length=3072 \
@@ -48,12 +48,13 @@ export HYDRA_FULL_ERROR=1
     data.image_key=images \
     data.reward_fn_key=swift_reward_type \
     actor_rollout_ref.model.path=/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/20250528.CoT_Mix_tianke_v3.from_mpo_v1_from_19083/output/v1-20250528-213601/checkpoint-5154 \
+    +actor_rollout_ref.model.trust_remote_code=True \
     ++actor_rollout_ref.actor.freeze_vision_tower=True \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
     actor_rollout_ref.actor.optim.warmup_style=cosine \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_epochs=2 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=False \
@@ -93,7 +94,7 @@ export HYDRA_FULL_ERROR=1
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
-    trainer.nnodes=8 \
+    trainer.nnodes=1 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.default_local_dir="${CKPTS_DIR}" \

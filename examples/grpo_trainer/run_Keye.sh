@@ -7,14 +7,14 @@ export NCCL_IB_GID_INDEX=3
 export NCCL_SOCKET_IFNAME=eth
 export NCCL_IB_HCA=mlx5
 # 使用自己的wandb_api_key
-export WANDB_API_KEY=173c259f71eff84cef8c20b35fcdfa0aff803073
+export WANDB_API_KEY=2a51ee77ead415a63b08e6c2955ff2383f2d7fab
 
 wandb online
 
 # 下面的路径记得修改为自己的
 HOME=/nlp_group/huangjiaming
-project_name='verl_grpo_keye_8node_for_long_cot_full'
-exp_name='hjm_test'
+project_name='verl_grpo_keye_8node_for_long_cot_full_0603_tianlin_perf'
+exp_name='htl_test'
 
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
 # 务必保留,用于分布式group打点做区分
@@ -32,10 +32,10 @@ export HYDRA_FULL_ERROR=1
     algorithm.adv_estimator=grpo \
     data.custom_cls.name=Qwen3RLHFDataset \
     data.custom_cls.path=$HOME/kai-verl/verl/utils/dataset/qwen3_rl_dataset.py \
-    ++data.base_model_dir=/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/20250528.CoT_Mix_tianke_v3.from_mpo_v1_from_19083/output/v1-20250528-213601/checkpoint-5154 \
-    data.train_files=[$HOME/kai-verl/dataset_MMPR_K12_nn_addTokenLen__mmpr1.1_minlen30_sample5w__fixsystem__instuctnothink__new_think_token__fixnothink.parquet,$HOME/kai-verl/OpenR1_Math_220k_rule_long_cot_new_think_token.parquet] \
+    ++data.base_model_dir=/hetu_group/jky/misc/tools/swift_20250508/playground/keye_8b/rl/20250604.1.cot_mix_nowarmup_newthinktoken__vllm__dapo/output/v1-20250604-205443/checkpoint-10 \
+    data.train_files=[$HOME/kai-verl/dataset_MMPR_K12_nn_addTokenLen__mmpr1.1_minlen30_sample5w__fixsystem__instuctnothink__new_think_token__fixnothink.parquet,$HOME/kai-verl/OpenR1_Math_220k_rule_long_cot_new_think_token.parquet,$HOME/kai-verl/ocr_qwen2vl7b_sampled_jsonl_rule_selected_fromcyy_cotmixrlformat.parquet,$HOME/kai-verl/VQAv2_sample2w__cotmixrlformat.parquet] \
     data.val_files=$HOME/kai-verl/single.parquet \
-    data.train_batch_size=192 \
+    data.train_batch_size=32 \
     ++data.dataloader_num_workers=8 \
     data.max_prompt_length=5120 \
     data.max_response_length=3072 \
@@ -44,26 +44,27 @@ export HYDRA_FULL_ERROR=1
     data.prompt_key=messages \
     data.image_key=images \
     data.reward_fn_key=swift_reward_type \
-    actor_rollout_ref.model.path=/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/20250528.CoT_Mix_tianke_v3.from_mpo_v1_from_19083/output/v1-20250528-213601/checkpoint-5154 \
+    actor_rollout_ref.model.path=/hetu_group/jky/misc/tools/swift_20250508/playground/keye_8b/rl/20250604.1.cot_mix_nowarmup_newthinktoken__vllm__dapo/output/v1-20250604-205443/checkpoint-10 \
+    +actor_rollout_ref.model.trust_remote_code=True \
     ++actor_rollout_ref.actor.freeze_vision_tower=True \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
     actor_rollout_ref.actor.optim.warmup_style=cosine \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=192 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.ppo_epochs=2 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.grad_clip=0.5 \
-    actor_rollout_ref.model.enable_gradient_checkpointing=False \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     ++actor_rollout_ref.actor.fsdp_config.use_orig_params=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
@@ -90,7 +91,7 @@ export HYDRA_FULL_ERROR=1
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
-    trainer.nnodes=8 \
+    trainer.nnodes=4 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.default_local_dir="${CKPTS_DIR}" \
