@@ -744,21 +744,24 @@ class RayPPOTrainer:
         if self.use_critic:
             self.critic_wg = all_wg["critic"]
             self.critic_wg.init_model()
+            self._report_timing_stat()
 
         if self.use_reference_policy:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
+            self._report_timing_stat()
 
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+            self._report_timing_stat()
         if self.use_rm_worker:
             self.rm_worker_wg = all_wg['rm_worker']
-
-
+    
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
+        self._report_timing_stat()
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -925,7 +928,7 @@ class RayPPOTrainer:
         
         if self.use_critic:
             report_stat(self.critic_wg.get_timing_report())
- 
+
         if self.use_reference_policy:
             report_stat(self.ref_policy_wg.get_timing_report())
 
@@ -1002,6 +1005,8 @@ class RayPPOTrainer:
                     # generate a batch
                     with _timer("gen", timing_raw):
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        self._report_timing_stat()
+                        continue
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):

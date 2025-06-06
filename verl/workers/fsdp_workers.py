@@ -183,18 +183,19 @@ class ActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage("Before init from HF AutoModel", logger=logger)
         local_path = copy_to_local(model_path)
-
-        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
+        with self.timing_record("init_model/build_fsdp_model_optimizer/load_tokenizer"):
+            # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
+            # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
+            self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        with self.timing_record("init_model/build_fsdp_model_optimizer/load_processor"):    
+            self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
         torch_dtype = fsdp_config.get("model_dtype", None)
         if torch_dtype is None:
             torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
         else:
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
-
+    
         # override model kwargs
         actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
 
@@ -209,59 +210,60 @@ class ActorRolloutRefWorker(Worker):
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
+        with self.timing_record("init_model/build_fsdp_model_optimizer/init_context"):
+            # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
+            init_context = get_init_weight_context_manager(
+                use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
+            )
 
-        # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
-        )
-
-        with init_context(), warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
-                actor_module_class = AutoModelForVision2Seq
-            else:
-                actor_module_class = AutoModelForCausalLM
-
-
-            from recovlm.models.keye.modeling_keye import KeyeForConditionalGeneration
-             
-            if isinstance(actor_model_config, transformers.models.Keye.configuration_keye.KeyeConfig):
-                actor_module_class = KeyeForConditionalGeneration
+            with init_context(), warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
+                    actor_module_class = AutoModelForVision2Seq
+                else:
+                    actor_module_class = AutoModelForCausalLM
 
 
-            if actor_module_class != KeyeForConditionalGeneration:
-                actor_module = actor_module_class.from_pretrained(
-                    pretrained_model_name_or_path=local_path,
-                    torch_dtype=torch_dtype,
-                    config=actor_model_config,
-                    attn_implementation="flash_attention_2",
-                    trust_remote_code=trust_remote_code,
-                )
-            else: 
-                actor_module = actor_module_class.from_pretrained(
-                    local_path,
-                    _attn_implementation="flash_attention_2",
-                    use_cache = False,
-                    ignore_mismatched_sizes=True
-                )
-                actor_module.processor = self.processor
+                from recovlm.models.keye.modeling_keye import KeyeForConditionalGeneration
+                
+                if isinstance(actor_model_config, transformers.models.Keye.configuration_keye.KeyeConfig):
+                    actor_module_class = KeyeForConditionalGeneration
 
-            if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
-                from verl.models.transformers.monkey_patch import apply_monkey_patch
+                with self.timing_record("init_model/build_actor_fsdp/init_context/from_pretrained"):
+                    if actor_module_class != KeyeForConditionalGeneration:
+                        actor_module = actor_module_class.from_pretrained(
+                            pretrained_model_name_or_path=local_path,
+                            torch_dtype=torch_dtype,
+                            config=actor_model_config,
+                            attn_implementation="flash_attention_2",
+                            trust_remote_code=trust_remote_code,
+                        )
+                    else: 
+                        actor_module = actor_module_class.from_pretrained(
+                            local_path,
+                            _attn_implementation="flash_attention_2",
+                            use_cache = False,
+                            ignore_mismatched_sizes=True
+                        )
+                        actor_module.processor = self.processor
 
-                apply_monkey_patch(model=actor_module, ulysses_sp_size=self.ulysses_sequence_parallel_size)
+                if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
+                    from verl.models.transformers.monkey_patch import apply_monkey_patch
 
-            # Apply Liger kernel to the model if use_liger is set to True
-            if use_liger:
-                from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
+                    apply_monkey_patch(model=actor_module, ulysses_sp_size=self.ulysses_sequence_parallel_size)
 
-                _apply_liger_kernel_to_instance(model=actor_module)
+                # Apply Liger kernel to the model if use_liger is set to True
+                if use_liger:
+                    from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
-            # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
-            actor_module.to(torch_dtype)
+                    _apply_liger_kernel_to_instance(model=actor_module)
 
-            if enable_gradient_checkpointing:
-                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
+                actor_module.to(torch_dtype)
+
+                if enable_gradient_checkpointing:
+                    actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
         # freeze visual tower
         if self.config.actor.freeze_vision_tower:
             if hasattr(actor_module, "visual"):
@@ -289,37 +291,37 @@ class ActorRolloutRefWorker(Worker):
             param_dtype = torch.bfloat16
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
+        with self.timing_record("init_model/build_fsdp_model_optimizer/wrap_fsdp"):
+            mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+            auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
 
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+            if self._is_rollout and self.config.rollout.name == "hf":
+                # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
+                auto_wrap_policy = None
 
-        if self._is_rollout and self.config.rollout.name == "hf":
-            # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
-            auto_wrap_policy = None
+            print(f"wrap_policy: {auto_wrap_policy}")
 
-        print(f"wrap_policy: {auto_wrap_policy}")
+            fsdp_mesh = self.device_mesh
+            sharding_strategy = get_sharding_strategy(fsdp_mesh)
 
-        fsdp_mesh = self.device_mesh
-        sharding_strategy = get_sharding_strategy(fsdp_mesh)
-
-        # TODO: add transformer policy
-        # We force reference policy to use CPUOffload to save memory.
-        # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
-        cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
-        actor_module_fsdp = FSDP(
-            actor_module,
-            cpu_offload=cpu_offload,
-            param_init_fn=init_fn,
-            use_orig_params=fsdp_config.use_orig_params,
-            auto_wrap_policy=auto_wrap_policy,
-            device_id=torch.cuda.current_device(),
-            sharding_strategy=sharding_strategy,  # zero2
-            mixed_precision=mixed_precision,
-            sync_module_states=True,
-            device_mesh=self.device_mesh,
-            forward_prefetch=False
-        )
+            # TODO: add transformer policy
+            # We force reference policy to use CPUOffload to save memory.
+            # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
+            cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
+            actor_module_fsdp = FSDP(
+                actor_module,
+                cpu_offload=cpu_offload,
+                param_init_fn=init_fn,
+                use_orig_params=fsdp_config.use_orig_params,
+                auto_wrap_policy=auto_wrap_policy,
+                device_id=torch.cuda.current_device(),
+                sharding_strategy=sharding_strategy,  # zero2
+                mixed_precision=mixed_precision,
+                sync_module_states=True,
+                device_mesh=self.device_mesh,
+                forward_prefetch=False
+            )
 
         actor_module_fsdp.processor = self.processor
 
@@ -328,33 +330,33 @@ class ActorRolloutRefWorker(Worker):
         # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
-
-            actor_optimizer = optim.AdamW(
-                filter(lambda p: p.requires_grad, actor_module_fsdp.parameters()),
-                lr=optim_config.lr,
-                betas=optim_config.get("betas", (0.9, 0.999)),
-                weight_decay=optim_config.get("weight_decay", 1e-2),
-            )
-
-            total_steps = optim_config.get("total_training_steps", 0)
-            num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
-            warmup_style = optim_config.get("warmup_style", "constant")
-            if num_warmup_steps < 0:
-                num_warmup_steps_ratio = optim_config.get("lr_warmup_steps_ratio", 0.0)
-                num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
-
-            print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
-
-            if warmup_style == "constant":
-                actor_lr_scheduler = get_constant_schedule_with_warmup(
-                    optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps
+            with self.timing_record("init_model/build_fsdp_model_optimizer/init_actor_optimizer_scheduler"):
+                actor_optimizer = optim.AdamW(
+                    filter(lambda p: p.requires_grad, actor_module_fsdp.parameters()),
+                    lr=optim_config.lr,
+                    betas=optim_config.get("betas", (0.9, 0.999)),
+                    weight_decay=optim_config.get("weight_decay", 1e-2),
                 )
-            elif warmup_style == "cosine":
-                actor_lr_scheduler = get_cosine_schedule_with_warmup(
-                    optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps
-                )
-            else:
-                raise NotImplementedError(f"Warmup style {warmup_style} is not supported")
+
+                total_steps = optim_config.get("total_training_steps", 0)
+                num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
+                warmup_style = optim_config.get("warmup_style", "constant")
+                if num_warmup_steps < 0:
+                    num_warmup_steps_ratio = optim_config.get("lr_warmup_steps_ratio", 0.0)
+                    num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+
+                print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
+
+                if warmup_style == "constant":
+                    actor_lr_scheduler = get_constant_schedule_with_warmup(
+                        optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps
+                    )
+                elif warmup_style == "cosine":
+                    actor_lr_scheduler = get_cosine_schedule_with_warmup(
+                        optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps
+                    )
+                else:
+                    raise NotImplementedError(f"Warmup style {warmup_style} is not supported")
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
@@ -365,22 +367,22 @@ class ActorRolloutRefWorker(Worker):
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
-
+        with self.timing_record("init_model/build_rollout/init_device_mesh"):
         # TODO(sgm): support FSDP hybrid shard for larger model
-        infer_tp = self.config.rollout.tensor_model_parallel_size
-        dp = self.world_size // infer_tp
-        assert self.world_size % infer_tp == 0, (
-            f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
-        )
-        rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
+            infer_tp = self.config.rollout.tensor_model_parallel_size
+            dp = self.world_size // infer_tp
+            assert self.world_size % infer_tp == 0, (
+                f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
+            )
+            rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
         rollout_name = self.config.rollout.name
         if rollout_name == "hf":
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager import BaseShardingManager
-
-            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout, tokenizer=self.tokenizer)
-            rollout_sharding_manager = BaseShardingManager()
-            # TODO: a sharding manager that do nothing?
+            with self.timing_record("init_model/build_rollout/HFRollout"):
+                rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout, tokenizer=self.tokenizer)
+                rollout_sharding_manager = BaseShardingManager()
+                # TODO: a sharding manager that do nothing?
 
         elif rollout_name == "vllm":
             from verl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
@@ -388,27 +390,36 @@ class ActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=None)
             local_path = copy_to_local(self.config.model.path)
-            if vllm_mode == "customized":
-                rollout = vLLMRollout(
-                    actor_module=self.actor_module_fsdp,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                )
-            elif vllm_mode == "spmd":
-                rollout = vLLMRollout(
-                    model_path=local_path,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    device_mesh=rollout_device_mesh,
-                    trust_remote_code=trust_remote_code,
-                )
-            else:
-                raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+            with self.timing_record(f"init_model/build_rollout/init_vllm_rollout_{vllm_mode}"):
+                if vllm_mode == "customized":
+                    rollout = vLLMRollout(
+                        actor_module=self.actor_module_fsdp,
+                        config=self.config.rollout,
+                        tokenizer=self.tokenizer,
+                        model_hf_config=self.actor_model_config,
+                    )
+                elif vllm_mode == "spmd":
+                    rollout = vLLMRollout(
+                        model_path=local_path,
+                        config=self.config.rollout,
+                        tokenizer=self.tokenizer,
+                        model_hf_config=self.actor_model_config,
+                        device_mesh=rollout_device_mesh,
+                        trust_remote_code=trust_remote_code,
+                    )
+                else:
+                    raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+                    
+            for k, v in rollout.timing_data.items():
+                name = k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+            rollout.timing_data.clear()
+
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=None)
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = "dummy_hf"
+            
             rollout_sharding_manager = FSDPVLLMShardingManager(
                 module=self.actor_module_fsdp,
                 inference_engine=rollout.inference_engine,
@@ -430,107 +441,117 @@ class ActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=None)
             local_path = copy_to_local(self.config.model.path)
-            rollout = SGLangRollout(
-                actor_module=local_path,
-                config=self.config.rollout,
-                tokenizer=self.tokenizer,
-                model_hf_config=self.actor_model_config,
-            )
+            with self.timing_record("init_model/build_rollout/SGLangRollout"):
+                rollout = SGLangRollout(
+                    actor_module=local_path,
+                    config=self.config.rollout,
+                    tokenizer=self.tokenizer,
+                    model_hf_config=self.actor_model_config,
+                )
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=None)
 
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = "dummy_hf"
-            rollout_sharding_manager = FSDPSGLangShardingManager(
-                module=self.actor_module_fsdp,
-                inference_engine=rollout.inference_engine,
-                model_config=self.actor_model_config,
-                full_params="hf" in self.config.rollout.load_format,
-                device_mesh=rollout_device_mesh,
-            )
+            with self.timing_record("init_model/build_rollout/sglang_sharding_manager"):
+                rollout_sharding_manager = FSDPSGLangShardingManager(
+                    module=self.actor_module_fsdp,
+                    inference_engine=rollout.inference_engine,
+                    model_config=self.actor_model_config,
+                    full_params="hf" in self.config.rollout.load_format,
+                    device_mesh=rollout_device_mesh,
+                )
             log_gpu_memory_usage("After building sharding manager", logger=None)
 
         return rollout, rollout_sharding_manager
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.actor import DataParallelPPOActor
+        with self.timing_record("init_model/total"):
+            from verl.workers.actor import DataParallelPPOActor
 
-        # This is used to import external_lib into the huggingface systems
-        import_external_libs(self.config.model.get("external_lib", None))
+            # This is used to import external_lib into the huggingface systems
+            import_external_libs(self.config.model.get("external_lib", None))
 
-        from omegaconf import OmegaConf
+            from omegaconf import OmegaConf
 
-        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+            override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
 
-        use_remove_padding = self.config.model.get("use_remove_padding", False)
+            use_remove_padding = self.config.model.get("use_remove_padding", False)
 
-        if self._is_actor or self._is_rollout:
-            # we need the model for actor and rollout
+            if self._is_actor or self._is_rollout:
+                # we need the model for actor and rollout
+                if self._is_actor:
+                    optim_config = self.config.actor.optim
+                    fsdp_config = self.config.actor.fsdp_config
+                else:
+                    optim_config = None
+                    fsdp_config = OmegaConf.create()
+                with self.timing_record("init_model/build_actor_fsdp_model_optimizer"):
+                    self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = (
+                        self._build_model_optimizer(
+                            model_path=self.config.model.path,
+                            fsdp_config=fsdp_config,
+                            optim_config=optim_config,
+                            override_model_config=override_model_config,
+                            use_remove_padding=use_remove_padding,
+                            enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
+                            trust_remote_code=self.config.model.get("trust_remote_code", False),
+                            use_liger=self.config.model.get("use_liger", False),
+                            role="actor",
+                        )
+                    )
+
+                # get the original unwrapped module
+                #self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
+
+                if self._is_offload_optimizer:
+                    with self.timing_record("init_model/offload_optimizer"):
+                        offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+                        log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
+            # load from checkpoint
             if self._is_actor:
-                optim_config = self.config.actor.optim
-                fsdp_config = self.config.actor.fsdp_config
-            else:
-                optim_config = None
-                fsdp_config = OmegaConf.create()
-            self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = (
-                self._build_model_optimizer(
-                    model_path=self.config.model.path,
-                    fsdp_config=fsdp_config,
-                    optim_config=optim_config,
-                    override_model_config=override_model_config,
-                    use_remove_padding=use_remove_padding,
-                    enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
-                    trust_remote_code=self.config.model.get("trust_remote_code", False),
-                    use_liger=self.config.model.get("use_liger", False),
-                    role="actor",
-                )
-            )
+                OmegaConf.set_struct(self.config.actor, True)
+                with open_dict(self.config.actor):
+                    self.config.actor.use_remove_padding = use_remove_padding
+                with self.timing_record("init_model/build_actor_wrapper"):
+                    self.actor = DataParallelPPOActor(
+                        config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
+                    )
 
-            # get the original unwrapped module
-            #self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
+            if self._is_rollout:
+                with self.timing_record("init_model/build_rollout"):
+                    self.rollout, self.rollout_sharding_manager = self._build_rollout(
+                        trust_remote_code=self.config.model.get("trust_remote_code", False)
+                    )
 
-            if self._is_offload_optimizer:
-                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-                log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
-        # load from checkpoint
-        if self._is_actor:
-            OmegaConf.set_struct(self.config.actor, True)
-            with open_dict(self.config.actor):
-                self.config.actor.use_remove_padding = use_remove_padding
-            self.actor = DataParallelPPOActor(
-                config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
-            )
+            if self._is_ref:
+                with self.timing_record("init_model/build_ref_fsdp_model_optimizer"):
+                    self.ref_module_fsdp = self._build_model_optimizer(
+                        model_path=self.config.model.path,
+                        fsdp_config=self.config.ref.fsdp_config,
+                        optim_config=None,
+                        override_model_config=override_model_config,
+                        use_remove_padding=use_remove_padding,
+                        trust_remote_code=self.config.model.get("trust_remote_code", False),
+                        use_liger=self.config.model.get("use_liger", False),
+                        role="ref",
+                    )[0]
+                OmegaConf.set_struct(self.config.ref, True)
+                with open_dict(self.config.ref):
+                    self.config.ref.use_remove_padding = use_remove_padding
+                with self.timing_record("init_model/build_ref_wrapper"):
+                    self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
-        if self._is_rollout:
-            self.rollout, self.rollout_sharding_manager = self._build_rollout(
-                trust_remote_code=self.config.model.get("trust_remote_code", False)
-            )
-
-        if self._is_ref:
-            self.ref_module_fsdp = self._build_model_optimizer(
-                model_path=self.config.model.path,
-                fsdp_config=self.config.ref.fsdp_config,
-                optim_config=None,
-                override_model_config=override_model_config,
-                use_remove_padding=use_remove_padding,
-                trust_remote_code=self.config.model.get("trust_remote_code", False),
-                use_liger=self.config.model.get("use_liger", False),
-                role="ref",
-            )[0]
-            OmegaConf.set_struct(self.config.ref, True)
-            with open_dict(self.config.ref):
-                self.config.ref.use_remove_padding = use_remove_padding
-            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
-
-        if self._is_actor:
-            self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_manager = FSDPCheckpointManager(
-                model=self.actor_module_fsdp,
-                optimizer=self.actor.actor_optimizer,
-                lr_scheduler=self.actor_lr_scheduler,
-                processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_contents=self.config.actor.checkpoint.contents,
-            )
+            if self._is_actor:
+                with self.timing_record("init_model/setup_flops_and_ckpt"):
+                    self.flops_counter = FlopsCounter(self.actor_model_config)
+                    self.checkpoint_manager = FSDPCheckpointManager(
+                        model=self.actor_module_fsdp,
+                        optimizer=self.actor.actor_optimizer,
+                        lr_scheduler=self.actor_lr_scheduler,
+                        processing_class=self.processor if self.processor is not None else self.tokenizer,
+                        checkpoint_contents=self.config.actor.checkpoint.contents,
+                    )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -617,8 +638,12 @@ class ActorRolloutRefWorker(Worker):
                 output = self.rollout.generate_sequences(prompts=prompts)
             with self.timing_record('generate_sequences/postprocess_data'):
                 output = self.rollout_sharding_manager.postprocess_data(output)
-
-
+        for k, v in self.rollout_sharding_manager.timing_data.items():
+            name = k
+            assert name not in self.timing_data
+            self.timing_data[name] = v
+    
+        self.rollout_sharding_manager.timing_data.clear()
         with self.timing_record('generate_sequences/D2H'):
             output = output.to("cpu")
 
@@ -935,32 +960,35 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        # This is used to import external_lib into the huggingface systems
-        import_external_libs(self.config.model.get("external_lib", None))
+        with self.timing_record("init_critic/total"):
+            # This is used to import external_lib into the huggingface systems
+            import_external_libs(self.config.model.get("external_lib", None))
+            
+            from verl.workers.critic import DataParallelPPOCritic
+            with self.timing_record("init_critic/build_model_optimizer"):
+                self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = self._build_critic_model_optimizer(
+                    self.config
+                )
 
-        from verl.workers.critic import DataParallelPPOCritic
-
-        self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = self._build_critic_model_optimizer(
-            self.config
-        )
-
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.critic_optimizer)
-
-        self.critic = DataParallelPPOCritic(
-            config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer
-        )
-
-        self.flops_counter = FlopsCounter(self.critic_model_config)
-        self.checkpoint_manager = FSDPCheckpointManager(
-            model=self.critic_module,
-            optimizer=self.critic_optimizer,
-            lr_scheduler=self.critic_lr_scheduler,
-            processing_class=self.processor if self.processor is not None else self.tokenizer,
-            checkpoint_contents=self.config.checkpoint.contents,
-        )
+            if self._is_offload_param:
+                with self.timing_record("init_critic/offload_model_param"):
+                    offload_fsdp_model_to_cpu(self.critic_module)
+            if self._is_offload_optimizer:
+                with self.timing_record("init_critic/offload_optimizer"):
+                    offload_fsdp_optimizer(optimizer=self.critic_optimizer)
+            with self.timing_record("init_critic/build_critic_wrapper"):
+                self.critic = DataParallelPPOCritic(
+                    config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer
+                )
+            with self.timing_record("init_critic/setup_flops_ckpt"):
+                self.flops_counter = FlopsCounter(self.critic_model_config)
+                self.checkpoint_manager = FSDPCheckpointManager(
+                    model=self.critic_module,
+                    optimizer=self.critic_optimizer,
+                    lr_scheduler=self.critic_lr_scheduler,
+                    processing_class=self.processor if self.processor is not None else self.tokenizer,
+                    checkpoint_contents=self.config.checkpoint.contents,
+                )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
@@ -1184,7 +1212,8 @@ class RewardModelWorker(Worker):
     def init_model(self):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
-        self.reward_module = self._build_model(config=self.config)
+        with self.timing_record('reward/build_model'):
+            self.reward_module = self._build_model(config=self.config)
 
     def _forward_micro_batch(self, micro_batch):
         from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input

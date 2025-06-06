@@ -7,7 +7,7 @@ export NCCL_IB_GID_INDEX=3
 export NCCL_SOCKET_IFNAME=eth
 export NCCL_IB_HCA=mlx5
 # 使用自己的wandb_api_key
-export WANDB_API_KEY=2a51ee77ead415a63b08e6c2955ff2383f2d7fab
+export WANDB_API_KEY=639f7c610305be1a79ddb087afecc2e95cedcc08
 
 wandb online
 
@@ -87,11 +87,11 @@ export HYDRA_FULL_ERROR=1
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \
     trainer.val_before_train=False \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
-    trainer.nnodes=4 \
+    trainer.nnodes=2 \
     trainer.save_freq=10 \
     trainer.test_freq=5 \
     trainer.default_local_dir="${CKPTS_DIR}" \
