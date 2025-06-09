@@ -370,14 +370,14 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         if self._is_actor:
             with self.timing_record("init_model/build_megatron_actor"):
-            self.actor = MegatronPPOActor(
-                config=self.config.actor,
-                model_config=self.actor_model_config,
-                hf_config=self.hf_config,
-                tf_config=self.tf_config,
-                actor_module=self.actor_module,
-                actor_optimizer=self.actor_optimizer,
-            )
+                self.actor = MegatronPPOActor(
+                    config=self.config.actor,
+                    model_config=self.actor_model_config,
+                    hf_config=self.hf_config,
+                    tf_config=self.tf_config,
+                    actor_module=self.actor_module,
+                    actor_optimizer=self.actor_optimizer,
+                )
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
 
         if self._is_rollout:
@@ -513,6 +513,12 @@ class ActorRolloutRefWorker(MegatronWorker):
             with self.timing_record('generate_sequences/postprocess_data'):
                 output = self.sharding_manager.postprocess_data(output)
 
+        for k, v in self.sharding_manager.timing_data.items():
+            name = k
+            assert name not in self.timing_data
+            self.timing_data[name] = v
+    
+        self.sharding_manager.timing_data.clear()
         timing_generate.update(self.sharding_manager.timing)
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same

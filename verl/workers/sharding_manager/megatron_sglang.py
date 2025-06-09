@@ -83,6 +83,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
             torch.cuda.set_rng_state(self.torch_random_states)
         else:
             self.gen_random_states = None
+        self.timing_data = {}
 
     @GPUMemoryLogger(role="MegatronSGLangShardingManager enter", logger=logger)
     def __enter__(self):

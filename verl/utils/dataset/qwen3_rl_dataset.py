@@ -36,19 +36,17 @@ print("Script's sys.path:", sys.path)
 # 尝试导入
 try:
     import recovlm
+    from recovlm.data.datasets import ChatCompletionVisionParquetDataset_keye, get_rope_index
+    from recovlm.utils.qwen_vl_utils import process_vision_info
+    class SkipBuildSourceDataset(ChatCompletionVisionParquetDataset_keye):
+      # NOTE(huangjiaming): here we dont build dataset, we build outside
+      def _build_source_dataset(self, sources):
+          return None, -1
+
     print("recovlm imported successfully in script.")
 except ModuleNotFoundError as e:
     print(f"ModuleNotFoundError in script: {e}")
-    raise ValueError(f'e')
-from recovlm.data.datasets import ChatCompletionVisionParquetDataset_keye, get_rope_index
-from recovlm.utils.qwen_vl_utils import process_vision_info
 
-
-
-class SkipBuildSourceDataset(ChatCompletionVisionParquetDataset_keye):
-  # NOTE(huangjiaming): here we dont build dataset, we build outside
-  def _build_source_dataset(self, sources):
-      return None, -1
 
 
 def collate_fn(data_list: list[dict]) -> dict:
