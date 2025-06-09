@@ -16,12 +16,9 @@ import inspect
 import logging
 import os
 import time
-<<<<<<< HEAD
 from contextlib import contextmanager
-=======
 from collections import OrderedDict
 
->>>>>>> main
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
@@ -158,61 +155,6 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         #
         # pytorch: https://pytorch.org/docs/stable/notes/cuda.html#memory-management
         # vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/device_allocator/cumem.py#L103
-<<<<<<< HEAD
-        with self.timing_record("rollout_sharding/enter"):
-            with self.timing_record("rollout_sharding/enter/empty_cache_before_state_dict"):
-                torch.cuda.empty_cache()
-            log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
-            with self.timing_record("rollout_sharding/enter/get_state_dict"):
-                params = self.module.state_dict()
-            log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
-            # Copy, not share memory
-            load_format = "hf" if self.full_params else "dtensor"
-
-            if vllm_version in (
-                "0.5.4",
-                "0.6.3",
-            ):
-                with self.timing_record("rollout_sharding/enter/sync_model_weights_legacy"):
-                    self.inference_engine.sync_model_weights(params, load_format=load_format)
-                log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
-                with self.timing_record("rollout_sharding/enter/del_params_legacy"):
-                    del params
-            else:
-                #with self.timing_record("rollout_sharding/enter/wake_up_weights"):
-                if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-                    with self.timing_record("rollout_sharding/enter/wake_up_weights"):
-                        self.inference_engine.wake_up(tags=["weights"])
-                else:
-                    with self.timing_record("rollout_sharding/enter/wake_up"):
-                        self.inference_engine.wake_up()
-
-                # update model params
-                with self.timing_record("rollout_sharding/enter/update_params"):
-                    self.update_params(params)
-                log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
-                with self.timing_record("rollout_sharding/enter/del_params"):
-                    del params
-                with self.timing_record("rollout_sharding/enter/empty_cache_after_delparams"):
-                    torch.cuda.empty_cache()
-                with self.timing_record("rollout_sharding/enter/wake_up_kv_cache"):
-                    if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-                        self.inference_engine.wake_up(tags=["kv_cache"])
-
-            log_gpu_memory_usage("After del state_dict and empty_cache in sharding manager", logger=logger)
-
-            # TODO: offload FSDP model weights
-            # self.module.cpu()
-            # torch.cuda.empty_cache()
-            # if torch.distributed.get_rank() == 0:
-            # print(f'after model to cpu in sharding manager memory allocated: {torch.cuda.memory_allocated() / 1e9}GB, reserved: {torch.cuda.memory_reserved() / 1e9}GB')
-
-            # important: need to manually set the random states of each tp to be identical.
-            if self.device_mesh is not None:
-                with self.timing_record("rollout_sharding/enter/setup_rng_state"):
-                    self.torch_random_states = torch.cuda.get_rng_state()
-                    torch.cuda.set_rng_state(self.gen_random_states)
-=======
         self.timing = {}
         with _timer("reshard", self.timing):
             get_torch_device().empty_cache()
@@ -264,39 +206,10 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             if self.device_mesh is not None:
                 self.torch_random_states = get_torch_device().get_rng_state()
                 get_torch_device().set_rng_state(self.gen_random_states)
->>>>>>> main
 
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
         # TODO(ZSL): check this
-<<<<<<< HEAD
-        with self.timing_record("rollout_sharding/exit"):
-            if vllm_version in (
-                "0.5.4",
-                "0.6.3",
-            ):
-                with self.timing_record("rollout_sharding/exit/offload_model_weights"):
-                    self.inference_engine.offload_model_weights()
-            else:
-                with self.timing_record("rollout_sharding/exit/sleep"):
-                    self.inference_engine.sleep(level=1)
-
-            # self.module.to('cuda')
-            # if torch.distributed.get_rank() == 0:
-            #     print(f'after actor module to cuda in sharding manager memory allocated: {torch.cuda.memory_allocated() / 1e9}GB, reserved: {torch.cuda.memory_reserved() / 1e9}GB')
-            with self.timing_record("rollout_sharding_manager/exit/set_train_mode"):
-                self.module.train()
-            
-            # add empty cache after each compute
-            with self.timing_record("rollout_sharding_manager/exit/empty_cache_after_compute"):
-                torch.cuda.empty_cache()
-
-            # restore random states
-            if self.device_mesh is not None:
-                with self.timing_record("rollout_sharding_manager/exit/restore_rng_state"):
-                    self.gen_random_states = torch.cuda.get_rng_state()
-                    torch.cuda.set_rng_state(self.torch_random_states)
-=======
         if vllm_version in (
             "0.5.4",
             "0.6.3",
@@ -314,7 +227,6 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         if self.device_mesh is not None:
             self.gen_random_states = get_torch_device().get_rng_state()
             get_torch_device().set_rng_state(self.torch_random_states)
->>>>>>> main
 
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def preprocess_data(self, data: DataProto) -> DataProto:
@@ -342,36 +254,6 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         return data.chunk(chunks=self.tp_size)[self.tp_rank]
 
-<<<<<<< HEAD
-    def update_params(self, updated_params):
-        model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
-        with self.timing_record("rollout_sharding/enter/update_params/patch_moe_loader"):
-            patch_vllm_moe_model_weight_loader(model)
-        world_size = torch.distributed.get_world_size()
-        with self.timing_record("rollout_sharding/enter/update_params/load_weights"):
-            loaded_params = model.load_weights(
-                ((name, param.full_tensor() if world_size != 1 and hasattr(param, "full_tensor") else param) for name, param in updated_params.items())
-            )
-        logger.info(f"vLLM load weights, loaded_params: {len(loaded_params)}")
-
-    @contextmanager
-    def timing_record(self, method_name : str, **kwargs):
-        start_time = time.perf_counter()
-        try:
-            yield
-        finally:
-            end_time = time.perf_counter()
-            duration = end_time - start_time
-            assert method_name not in self.timing_data, method_name
-            self.timing_data[method_name] = duration
-            #wandb.log({method_name : duration})
-            for k,v in kwargs:
-                name = method_name + '/' + k
-                assert name not in self.timing_data
-                self.timing_data[name] = v
-                #wandb.log({name : v})
-
-=======
     def update_params(self, updated_params, peft_config=None):
         model = self.model_runner.model
         if peft_config:
@@ -405,4 +287,21 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         self.base_sync_done = True
         logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
->>>>>>> main
+
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            #wandb.log({method_name : duration})
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+                #wandb.log({name : v})
+
