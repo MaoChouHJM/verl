@@ -37,7 +37,7 @@ from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 from torch import nn
 from vllm import SamplingParams
-
+import time
 from verl import DataProto
 from verl.third_party.vllm import LLM, vllm_version
 from verl.third_party.vllm import parallel_state as vllm_ps
@@ -79,7 +79,7 @@ class vLLMRollout(BaseRollout):
         assert not (not config.enforce_eager and config.free_cache_engine), (
             "disable CUDA graph (enforce_eager = False) if free cache engine"
         )
-
+        self.timing_data = {}
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), (
             "tensor parallel size should be less than or equal to the world size"
@@ -114,7 +114,7 @@ class vLLMRollout(BaseRollout):
         if max_num_batched_tokens < max_model_len and self.config.enable_chunked_prefill:
             raise ValueError(
                 "Enable chunked prefill, max_num_batched_tokens is smaller than max_model_len, \
-                             please increase max_num_batched_tokens or disable chunked prefill"
+                            please increase max_num_batched_tokens or disable chunked prefill"
             )
 
         # copy it to avoid secretly modifying the engine config
@@ -124,25 +124,26 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
-        self.inference_engine = LLM(
-            actor_module,
-            tokenizer=tokenizer,
-            model_hf_config=model_hf_config,
-            tensor_parallel_size=tensor_parallel_size,
-            dtype=config.dtype,
-            enforce_eager=config.enforce_eager,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            skip_tokenizer_init=False,
-            max_model_len=max_model_len,
-            load_format=config.load_format,
-            disable_log_stats=config.disable_log_stats,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=config.enable_chunked_prefill,
-            **engine_kwargs,
-        )
-
-        # Offload vllm model to reduce peak memory usage
-        self.inference_engine.offload_model_weights()
+        with self.timing_record("init_model/build_rollout/init_vllm_rollout/init_inference_engine"):
+            self.inference_engine = LLM(
+                actor_module,
+                tokenizer=tokenizer,
+                model_hf_config=model_hf_config,
+                tensor_parallel_size=tensor_parallel_size,
+                dtype=config.dtype,
+                enforce_eager=config.enforce_eager,
+                gpu_memory_utilization=config.gpu_memory_utilization,
+                skip_tokenizer_init=False,
+                max_model_len=max_model_len,
+                load_format=config.load_format,
+                disable_log_stats=config.disable_log_stats,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=config.enable_chunked_prefill,
+                **engine_kwargs,
+            )
+        with self.timing_record("init_model/build_rollout/init_vllm_rollout/sleep"):
+            # Offload vllm model to reduce peak memory usage
+            self.inference_engine.offload_model_weights()
 
         kwargs = dict(
             n=1,
@@ -284,3 +285,21 @@ class vLLMRollout(BaseRollout):
             self.inference_engine.free_cache_engine()
 
         return DataProto(batch=batch)
+
+
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            #wandb.log({method_name : duration})
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+                #wandb.log({name : v})

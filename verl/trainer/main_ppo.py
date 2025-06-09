@@ -68,11 +68,22 @@ def run_ppo(config) -> None:
     # TODO(linjunrong.ocss884): this ENV is left for resolving SGLang conflict with ray devices
     # isolation, will solve in the future
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    user_custom_env = config.get("user_custom_env", {})
+    print(f"{user_custom_env=}")
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
             runtime_env={
-                "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}
+                "env_vars": {"TOKENIZERS_PARALLELISM": "true",
+                             "NCCL_DEBUG": "INFO",
+                             #"NCCL_IB_DISABLE": "0",
+                             #"NCCL_IB_GID_INDEX": "3",
+                             #"NCCL_SOCKET_IFNAME": "eth",
+                             #"NCCL_IB_HCA": "mlx5",
+                             "VLLM_LOGGING_LEVEL": "INFO",
+                             "TIMESTAMP": os.environ.get("TIMESTAMP", 'null'),
+                             "MONDB_PROJECT_NAME": os.environ.get("MONDB_PROJECT_NAME", 'none'),
+                             }.update(user_custom_env)
             },
             num_cpus=config.ray_init.num_cpus,
         )
@@ -164,10 +175,19 @@ class TaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
-        reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1)
+        if not config.reward_model.enable_reward_workers:
+            reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+            )
+            val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        else:
+            from functools import partial
+            reward_fn = partial(load_reward_manager,
+                config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+            )
+            val_reward_fn = partial(load_reward_manager, config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+
+              
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         trainer = RayPPOTrainer(

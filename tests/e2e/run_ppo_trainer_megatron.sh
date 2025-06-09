@@ -3,14 +3,16 @@ set -xeuo pipefail
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 
+export http_proxy=http://oversea-squid1.jp.txyun:11080 https_proxy=http://oversea-squid1.jp.txyun:11080 no_proxy=localhost,127.0.0.1,localaddress,localdomain.com,internal,corp.kuaishou.com,test.gifshow.com,staging.kuaishou.com
+
 NUM_GPUS=${NUM_GPUS:-8}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
-TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/gsm8k/train.parquet}
-VAL_FILES=${VAL_FILES:-${HOME}/data/gsm8k/test.parquet}
+TRAIN_FILES=${TRAIN_FILES:-/nlp_group/huangjiaming/data/gsm8k/train.parquet}
+VAL_FILES=${VAL_FILES:-/nlp_group/huangjiaming/data/gsm8k/test.parquet}
 
 ADV_ESTIMATOR=${ADV_ESTIMATOR:-gae}
 # Validation
@@ -53,7 +55,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.checkpoint.contents=['model','hf_model','optimizer','extra'] \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
@@ -86,4 +88,5 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.save_freq="${SAVE_FREQ}" \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.total_epochs=2 \
+    ++reward_model.enable_reward_workers=False \
     trainer.total_training_steps="${TOT_TRAIN_STEPS}" $@

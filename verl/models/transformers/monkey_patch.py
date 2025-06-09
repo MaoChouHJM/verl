@@ -130,6 +130,15 @@ def apply_monkey_patch(model: PreTrainedModel, ulysses_sp_size: int):
         print("Monkey patch FlashAttention2.forward in Qwen2VL")
         return
 
+    if model.config.model_type == "Keye":
+        from recovlm.models.keye.modeling_keye import KeyeFlashAttention2
+
+        from verl.models.transformers.keye import keye_attn_forward
+
+        KeyeFlashAttention2.forward = keye_attn_forward
+        print("Monkey patch FlashAttention2.forward in Keye")
+        return
+
     # transformers<=4.47.1
     if hasattr(module, "_flash_attention_forward"):
         module._flash_attention_forward = _ulysses_flash_attention_forward

@@ -20,8 +20,8 @@ class RewardWorker(Worker):
     def __init__(self, config, reward_fn, val_reward_fn):
         super().__init__()
         self.config = config
-        self.reward_fn = reward_fn
-        self.val_reward_fn = val_reward_fn
+        self.reward_fn = reward_fn()
+        self.val_reward_fn = val_reward_fn()
 
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

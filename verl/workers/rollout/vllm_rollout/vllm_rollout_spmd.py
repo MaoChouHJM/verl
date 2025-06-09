@@ -29,7 +29,7 @@ import logging
 import os
 from contextlib import contextmanager
 from typing import Any, List, Union
-
+import time
 import numpy as np
 import torch
 import torch.distributed
@@ -85,7 +85,7 @@ class vLLMRollout(BaseRollout):
         assert not (not config.enforce_eager and config.free_cache_engine), (
             "disable CUDA graph (enforce_eager = False) if free cache engine"
         )
-
+        self.timing_data = {}
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), (
             "tensor parallel size should be less than or equal to the world size"
@@ -98,17 +98,18 @@ class vLLMRollout(BaseRollout):
 
             os.environ["CUDA_TIMER_STREAM_KAFKA_ENABLE"] = "0"
             os.environ["MEGATRON_IMPORT_TIMERS"] = "0"
-            if vllm_version in (
-                "0.5.4",
-                "0.6.3",
-            ):
-                train_tp = kwargs.get("train_tp")
-                num_tp_per_train_tp = train_tp // tensor_parallel_size
-                vllm_ps.initialize_parallel_state(
-                    tensor_model_parallel_size=tensor_parallel_size, num_tp_per_train_tp=num_tp_per_train_tp
-                )
-            else:
-                vllm_ps.initialize_model_parallel(tensor_model_parallel_size=tensor_parallel_size)
+            with self.timing_record("init_model/build_rollout/init_vllm_rollout/parallel_init"):
+                if vllm_version in (
+                    "0.5.4",
+                    "0.6.3",
+                ):
+                    train_tp = kwargs.get("train_tp")
+                    num_tp_per_train_tp = train_tp // tensor_parallel_size
+                    vllm_ps.initialize_parallel_state(
+                        tensor_model_parallel_size=tensor_parallel_size, num_tp_per_train_tp=num_tp_per_train_tp
+                    )
+                else:
+                    vllm_ps.initialize_model_parallel(tensor_model_parallel_size=tensor_parallel_size)
 
         assert model_hf_config.max_position_embeddings >= config.prompt_length + config.response_length, (
             "model context length should be greater than total sequence length"
@@ -122,37 +123,39 @@ class vLLMRollout(BaseRollout):
                              please increase max_num_batched_tokens or disable chunked prefill"
             )
 
-        trust_remote_code = kwargs.get("trust_remote_code", False)
+        trust_remote_code = kwargs.get("trust_remote_code", True)
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
 
         limit_mm_per_prompt = None
         if config.get("limit_images", None):  # support for multi-image data
-            limit_mm_per_prompt = {"image": config.get("limit_images")}
+            limit_mm_per_prompt = {"image": config.get("limit_images"), "video": 0}
 
-        self.inference_engine = LLM(
-            model=model_path,
-            enable_sleep_mode=True,
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend="external_launcher",
-            dtype=config.dtype,
-            enforce_eager=config.enforce_eager,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=True,
-            limit_mm_per_prompt=limit_mm_per_prompt,
-            skip_tokenizer_init=False,
-            max_model_len=max_model_len,
-            load_format=load_format,
-            disable_log_stats=config.disable_log_stats,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=config.enable_chunked_prefill,
-            enable_prefix_caching=True,
-            trust_remote_code=trust_remote_code,
-            seed=config.get("seed", 0),
-        )
-
-        # Offload vllm model to reduce peak memory usage
-        self.inference_engine.sleep(level=1)
+        limit_mm_per_prompt = {"image": config.get("limit_images", 1), "video": 0}
+        with self.timing_record("init_model/build_rollout/init_vllm_rollout/init_inference_engine"):
+            self.inference_engine = LLM(
+                model=model_path,
+                enable_sleep_mode=True,
+                tensor_parallel_size=tensor_parallel_size,
+                distributed_executor_backend="external_launcher",
+                dtype=config.dtype,
+                enforce_eager=config.enforce_eager,
+                gpu_memory_utilization=config.gpu_memory_utilization,
+                disable_custom_all_reduce=True,
+                disable_mm_preprocessor_cache=True,
+                limit_mm_per_prompt=limit_mm_per_prompt,
+                skip_tokenizer_init=False,
+                max_model_len=max_model_len,
+                load_format=load_format,
+                disable_log_stats=config.disable_log_stats,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=config.enable_chunked_prefill,
+                enable_prefix_caching=True,
+                trust_remote_code=True,
+                seed=config.get("seed", 0),
+            )
+        with self.timing_record("init_model/build_rollout/init_vllm_rollout/sleep"):
+            # Offload vllm model to reduce peak memory usage
+            self.inference_engine.sleep(level=1)
 
         kwargs = dict(
             n=1,
@@ -338,3 +341,21 @@ class vLLMRollout(BaseRollout):
             self.inference_engine.free_cache_engine()
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+
+
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            #wandb.log({method_name : duration})
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+                #wandb.log({name : v})

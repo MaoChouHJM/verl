@@ -159,53 +159,58 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         # Step 3: initialize the megatron model
         if self._is_actor and self._is_rollout:
-            actor_module = get_model(
-                megatron_actor_model_provider,
-                wrap_with_ddp=True,
-                use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
-            )
+            with self.timing_record("build_megatron_model_optimizer/init_actor_module"):
+                actor_module = get_model(
+                    megatron_actor_model_provider,
+                    wrap_with_ddp=True,
+                    use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
+                )
             print(f"actor_module: {len(actor_module)}")
             if self.config.actor.load_weight:
-                if self.config.actor.megatron.use_dist_checkpointing:
-                    load_mcore_dist_weights(
-                        actor_module, self.config.actor.megatron.dist_checkpointing_path, is_value_model=False
-                    )
-                else:
-                    load_megatron_gptmodel_weights(
-                        self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False
-                    )
+                with self.timing_record("build_megatron_model_optimizer/load_actor_weight"):
+                    if self.config.actor.megatron.use_dist_checkpointing:
+                        load_mcore_dist_weights(
+                            actor_module, self.config.actor.megatron.dist_checkpointing_path, is_value_model=False
+                        )
+                    else:
+                        load_megatron_gptmodel_weights(
+                            self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False
+                        )
 
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
         elif self._is_ref:
             print(f"self.config.ref.load_weight: {self.config.ref.load_weight}")
-            ref_module = get_model(
-                model_provider_func=megatron_actor_model_provider,
-                model_type=ModelType.encoder_or_decoder,
-                wrap_with_ddp=False,
-                use_distributed_optimizer=self.config.ref.megatron.use_distributed_optimizer,
-            )
+            with self.timing_record("build_megatron_model_optimizer/init_ref_module"):
+                ref_module = get_model(
+                    model_provider_func=megatron_actor_model_provider,
+                    model_type=ModelType.encoder_or_decoder,
+                    wrap_with_ddp=False,
+                    use_distributed_optimizer=self.config.ref.megatron.use_distributed_optimizer,
+                )
             # ref_module = nn.ModuleList(ref_module)
 
             if self.config.ref.load_weight:  # should align with the actor:
                 assert self.config.actor.load_weight == self.config.ref.load_weight
                 print("load ref weight start")
-                if self.config.ref.megatron.use_dist_checkpointing:
-                    load_mcore_dist_weights(
-                        ref_module, self.config.ref.megatron.dist_checkpointing_path, is_value_model=False
-                    )
-                else:
-                    load_megatron_gptmodel_weights(
-                        self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False
-                    )
+                with self.timing_record("build_megatron_model_optimizer/load_ref_weight"):
+                    if self.config.ref.megatron.use_dist_checkpointing:
+                        load_mcore_dist_weights(
+                            ref_module, self.config.ref.megatron.dist_checkpointing_path, is_value_model=False
+                        )
+                    else:
+                        load_megatron_gptmodel_weights(
+                            self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False
+                        )
             log_gpu_memory_usage("After ref module init", logger=logger)
             return ref_module, self.hf_config
 
         # TODO: add more optimizer args into config
         if self._is_actor:
-            optim_config = init_megatron_optim_config(optim_config)
-            actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_config)
+            with self.timing_record("init_model/build_megatron_model_optimizer/init_actor_optimizer"):
+                optim_config = init_megatron_optim_config(optim_config)
+                actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_config)
         else:
             optim_config = None
             actor_optimizer = None
@@ -233,32 +238,34 @@ class ActorRolloutRefWorker(MegatronWorker):
             assert self.world_size % infer_tp == 0, (
                 f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
             )
-            rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
+            with self.timing_record("init_model/build_rollout/init_device_mesh"):
+                rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
             log_gpu_memory_usage("Before building vllm rollout", logger=None)
 
             local_path = copy_to_local(self.config.model.path)
-            if vllm_mode == "customized":
-                rollout = vLLMRollout(
-                    actor_module=self.actor_module,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                )
-            elif vllm_mode == "spmd":
-                rollout = vLLMRollout(
-                    model_path=local_path,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    device_mesh=rollout_device_mesh,
-                    trust_remote_code=trust_remote_code,
-                )
+            with self.timing_record(f"init_model/build_rollout/init_vllm_rollout_{vllm_mode}"):
+                if vllm_mode == "customized":
+                    rollout = vLLMRollout(
+                        actor_module=self.actor_module,
+                        config=self.config.rollout,
+                        tokenizer=self.tokenizer,
+                        model_hf_config=self.actor_model_config,
+                    )
+                elif vllm_mode == "spmd":
+                    rollout = vLLMRollout(
+                        model_path=local_path,
+                        config=self.config.rollout,
+                        tokenizer=self.tokenizer,
+                        model_hf_config=self.actor_model_config,
+                        device_mesh=rollout_device_mesh,
+                        trust_remote_code=trust_remote_code,
+                    )
             log_gpu_memory_usage("After building vllm rollout", logger=logger)
 
             # perform weight resharding between actor and rollout
             from verl.models.mcore import get_mcore_weight_converter
-
-            weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
+            with self.timing_record(f"init_model/build_rollout/init_vllm_rollout/weight_converter"):
+                weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
             sharding_manager = MegatronVLLMShardingManager(
                 inference_engine=rollout.inference_engine,
                 model_config=self.actor_model_config,
@@ -274,79 +281,86 @@ class ActorRolloutRefWorker(MegatronWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        if self.config.model.get("external_lib", None) is not None:
-            # This is used to import external_lib into the huggingface systems
-            import importlib
+        with self.timing_record("init_model/total"):
+            if self.config.model.get("external_lib", None) is not None:
+                # This is used to import external_lib into the huggingface systems
+                import importlib
 
-            importlib.import_module(self.config.model.external_lib)
+                importlib.import_module(self.config.model.external_lib)
 
-        from omegaconf import OmegaConf
+            from omegaconf import OmegaConf
 
-        from verl.utils.torch_dtypes import PrecisionType
+            from verl.utils.torch_dtypes import PrecisionType
 
-        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
-        self.param_dtype = torch.bfloat16
+            override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+            self.param_dtype = torch.bfloat16
 
-        self.dtype = PrecisionType.to_dtype(self.param_dtype)
-        if self._is_actor or self._is_rollout:
-            # we need the model for actor and rollout
-            optim_config = self.config.actor.optim if self._is_actor else None
-            self.actor_module, self.actor_optimizer, self.actor_model_config, self.actor_optim_config = (
-                self._build_model_optimizer(
-                    model_path=self.config.model.path,
-                    optim_config=optim_config,
-                    override_model_config=override_model_config,
-                )
-            )
+            self.dtype = PrecisionType.to_dtype(self.param_dtype)
+            if self._is_actor or self._is_rollout:
+                # we need the model for actor and rollout
+                optim_config = self.config.actor.optim if self._is_actor else None
+                with self.timing_record("init_model/build_actor_model_optimizer"):
+                    self.actor_module, self.actor_optimizer, self.actor_model_config, self.actor_optim_config = (
+                        self._build_model_optimizer(
+                            model_path=self.config.model.path,
+                            optim_config=optim_config,
+                            override_model_config=override_model_config,
+                        )
+                    )
 
-        if self._is_actor:
-            self.actor = MegatronPPOActor(
-                config=self.config.actor,
-                model_config=self.actor_model_config,
-                hf_config=self.hf_config,
-                tf_config=self.tf_config,
-                actor_module=self.actor_module,
-                actor_optimizer=self.actor_optimizer,
-            )
+            if self._is_actor:
+                with self.timing_record("init_model/build_actor_wrapper"):
+                    self.actor = MegatronPPOActor(
+                        config=self.config.actor,
+                        model_config=self.actor_model_config,
+                        hf_config=self.hf_config,
+                        tf_config=self.tf_config,
+                        actor_module=self.actor_module,
+                        actor_optimizer=self.actor_optimizer,
+                    )
 
-        if self._is_rollout:
-            self.rollout, self.sharding_manager = self._build_rollout(
-                trust_remote_code=self.config.model.get("trust_remote_code", False)
-            )
+            if self._is_rollout:
+                with self.timing_record("init_model/build_rollout"):
+                    self.rollout, self.sharding_manager = self._build_rollout(
+                        trust_remote_code=self.config.model.get("trust_remote_code", False)
+                    )
 
-        if self._is_ref:
-            self.ref_module, self.ref_model_config = self._build_model_optimizer(
-                model_path=self.config.model.path,
-                optim_config=None,
-                override_model_config=override_model_config,
-            )
-            self.ref_policy = MegatronPPOActor(
-                config=self.config.ref,
-                model_config=self.ref_model_config,
-                hf_config=self.hf_config,
-                tf_config=self.tf_config,
-                actor_module=self.ref_module,
-                actor_optimizer=None,
-            )
+            if self._is_ref:
+                with self.timing_record("init_model/build_ref_model_optimizer"):
+                    self.ref_module, self.ref_model_config = self._build_model_optimizer(
+                        model_path=self.config.model.path,
+                        optim_config=None,
+                        override_model_config=override_model_config,
+                    )
+                with self.timing_record("init_model/build_ref_wrapper"):
+                    self.ref_policy = MegatronPPOActor(
+                        config=self.config.ref,
+                        model_config=self.ref_model_config,
+                        hf_config=self.hf_config,
+                        tf_config=self.tf_config,
+                        actor_module=self.ref_module,
+                        actor_optimizer=None,
+                    )
 
-        if self._is_actor:
-            self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_mananager = MegatronCheckpointManager(
-                config=self.config,
-                model_config=self.actor_model_config,
-                role="actor",
-                model=self.actor_module,
-                arch=self.architectures[0],
-                hf_config=self.hf_config,
-                param_dtype=self.param_dtype,
-                share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
-                tokenizer=self.tokenizer,
-                optimizer=self.actor_optimizer,
-                use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
-                checkpoint_contents=self.config.actor.checkpoint.contents,
-            )
-
-        torch.cuda.empty_cache()
+            if self._is_actor:
+                with self.timing_record("init_model/setup_flops_and_ckpt"):
+                    self.flops_counter = FlopsCounter(self.actor_model_config)
+                    self.checkpoint_mananager = MegatronCheckpointManager(
+                        config=self.config,
+                        model_config=self.actor_model_config,
+                        role="actor",
+                        model=self.actor_module,
+                        arch=self.architectures[0],
+                        hf_config=self.hf_config,
+                        param_dtype=self.param_dtype,
+                        share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
+                        tokenizer=self.tokenizer,
+                        optimizer=self.actor_optimizer,
+                        use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
+                        checkpoint_contents=self.config.actor.checkpoint.contents,
+                    )
+            with self.timing_record("init_model/empty_cache"):
+                torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.MEGATRON_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -373,8 +387,8 @@ class ActorRolloutRefWorker(MegatronWorker):
     @register(dispatch_mode=Dispatch.MEGATRON_PP_AS_DP_PROTO)
     def generate_sequences(self, prompts: DataProto):
         assert self._is_rollout
-
-        prompts.batch = prompts.batch.cuda()
+        with self.timing_record('generate_sequences/prompts_to_device'):
+            prompts.batch = prompts.batch.cuda()
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id
             if self.generation_config is not None
@@ -384,14 +398,20 @@ class ActorRolloutRefWorker(MegatronWorker):
             else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
-        with self.sharding_manager:
-            prompts = self.sharding_manager.preprocess_data(prompts)
-            output = self.rollout.generate_sequences(prompts=prompts)
-            output = self.sharding_manager.postprocess_data(output)
 
-        output = output.to("cpu")
-        # clear kv cache
-        torch.cuda.empty_cache()
+        with self.timing_record('generate_sequences/sync_gen'), self.sharding_manager:
+            with self.timing_record('generate_sequences/preprocess_data'):
+                prompts = self.sharding_manager.preprocess_data(prompts)
+            with self.timing_record('generate_sequences/generate_sequences'):
+                output = self.rollout.generate_sequences(prompts=prompts)
+            with self.timing_record('generate_sequences/postprocess_data'):
+                output = self.sharding_manager.postprocess_data(output)
+        
+        with self.timing_record('generate_sequences/D2H'):
+            output = output.to("cpu")
+        with self.timing_record('generate_sequences/clear_kv_cache'):
+            # clear kv cache
+            torch.cuda.empty_cache()
         return output
 
     @register(dispatch_mode=Dispatch.MEGATRON_COMPUTE_PROTO)
