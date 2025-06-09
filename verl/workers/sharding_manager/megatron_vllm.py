@@ -18,7 +18,7 @@ This file contains a Megatron style Hybrid Engine that shares the weights of the
 import inspect
 import logging
 import os
-
+import time
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -308,7 +308,7 @@ class MegatronVLLMShardingManager(BaseShardingManager):
             group = new_group(ranks=ranks)
             if rank in ranks:
                 _MICRO_DATA_PARALLEL_GROUP = group
-
+        self.timing_data = {}
     def per_tensor_generator(self, convert_qkv_gate_up_by_simple_split=True):
         """
         convert_qkv_gate_up_by_simple_split is a parameter affected by the vLLM version.
@@ -512,41 +512,54 @@ class MegatronVLLMShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):
-        if vllm_version in (
-            "0.5.4",
-            "0.6.3",
-        ):
-            per_tensor_param = self.per_tensor_generator(convert_qkv_gate_up_by_simple_split=False)
-            self.inference_engine.sync_model_weights(per_tensor_param, load_format="megatron")
-        else:
-            # > 0.7.2
-            if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-                self.inference_engine.wake_up(tags=["weights"])
+        with self.timing_record("rollout_sharding/enter"):
+            if vllm_version in (
+                "0.5.4",
+                "0.6.3",
+            ):
+                with self.timing_record("rollout_sharding/enter/vllm_sync_model_weights"):
+                    per_tensor_param = self.per_tensor_generator(convert_qkv_gate_up_by_simple_split=False)
+                    self.inference_engine.sync_model_weights(per_tensor_param, load_format="megatron")
             else:
-                self.inference_engine.wake_up()
-            per_tensor_param = self.per_tensor_generator()
-            model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
-            patch_vllm_moe_model_weight_loader(model)
-            loaded_params = model.load_weights(per_tensor_param)
-            info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
-            logger.info(info)
+                # > 0.7.2
+                if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+                    with self.timing_record("rollout_sharding/enter/wake_up_weights"):
+                        self.inference_engine.wake_up(tags=["weights"])
+                else:
+                    with self.timing_record("rollout_sharding/enter/wake_up"):
+                        self.inference_engine.wake_up()
+                with self.timing_record("rollout_sharding/enter/generate_vllm_compatible_weights"):
+                    per_tensor_param = self.per_tensor_generator()
+                
+                model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+                with self.timing_record("rollout_sharding/enter/patch_moe_loader"):
+                    patch_vllm_moe_model_weight_loader(model)
+                with self.timing_record("rollout_sharding/enter/load_weights_into_vllm"):
+                    loaded_params = model.load_weights(per_tensor_param)
+                info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
+                logger.info(info)
 
-            if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-                self.inference_engine.wake_up(tags=["kv_cache"])
+                if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+                    with self.timing_record("rollout_sharding/enter/vllm_wake_up_kv_cache"):
+                        self.inference_engine.wake_up(tags=["kv_cache"])
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
-        if vllm_version in (
-            "0.5.4",
-            "0.6.3",
-        ):
-            self.inference_engine.offload_model_weights()
-        else:
-            self.inference_engine.sleep(level=1)
-        for model in self.actor_module:
-            model.train()
-
-        torch.cuda.empty_cache()
+        with self.timing_record("rollout_sharding/exit"):
+            if vllm_version in (
+                "0.5.4",
+                "0.6.3",
+            ):
+                with self.timing_record("rollout_sharding/exit/offload_model_weights"):
+                    self.inference_engine.offload_model_weights()
+            else:
+                with self.timing_record("rollout_sharding/exit/sleep"):
+                    self.inference_engine.sleep(level=1)
+            with self.timing_record("rollout_sharding_manager/exit/set_train_mode"):
+                for model in self.actor_module:
+                    model.train()
+            with self.timing_record("rollout_sharding_manager/exit/empty_cache_after_compute"):
+                torch.cuda.empty_cache()
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def preprocess_data(self, data: DataProto) -> DataProto:
@@ -571,6 +584,23 @@ class MegatronVLLMShardingManager(BaseShardingManager):
                 dim=0,
             )
         return data
+
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            #wandb.log({method_name : duration})
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+                #wandb.log({name : v})
 
 
 """
