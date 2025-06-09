@@ -15,13 +15,15 @@ import os
 import random
 import shutil
 import tempfile
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.distributed
 from filelock import FileLock
 from transformers import PreTrainedTokenizer, ProcessorMixin
+
+from verl.utils.device import is_cuda_available, is_npu_available
 
 
 class BaseCheckpointManager:
@@ -45,8 +47,10 @@ class BaseCheckpointManager:
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
         processing_class: Union[PreTrainedTokenizer, ProcessorMixin] = None,
-        checkpoint_contents: list = ["model", "optimizer", "extra"],
+        checkpoint_contents: Optional[list] = None,
     ):
+        if checkpoint_contents is None:
+            checkpoint_contents = ["model", "optimizer", "extra"]
         self.previous_global_step = None
         self.previous_saved_paths = []
 
@@ -62,9 +66,7 @@ class BaseCheckpointManager:
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         raise NotImplementedError
 
-    def save_checkpoint(
-        self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep: int = None
-    ):
+    def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep: int = None):
         raise NotImplementedError
 
     @staticmethod
@@ -107,21 +109,42 @@ class BaseCheckpointManager:
     def get_rng_state():
         rng_state = {
             "cpu": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state(),
             "numpy": np.random.get_state(),
             "random": random.getstate(),
         }
+
+        if is_cuda_available:
+            rng_state["cuda"] = torch.cuda.get_rng_state()
+        elif is_npu_available:
+            rng_state["npu"] = torch.npu.get_rng_state()
+
         return rng_state
 
     @staticmethod
     def load_rng_state(rng_state):
         torch.set_rng_state(rng_state["cpu"])
-        torch.cuda.set_rng_state(rng_state["cuda"])
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
+        if is_cuda_available:
+            torch.cuda.set_rng_state(rng_state["cuda"])
+        elif is_npu_available:
+            torch.npu.set_rng_state(rng_state["npu"])
+
 
 def find_latest_ckpt_path(path, directory_format="global_step_{}"):
+    """
+    Return the most recent checkpoint directory based on a tracker file.
+
+    Args:
+        path (str): Base directory containing the checkpoint tracker.
+        directory_format (str): Template for checkpoint subfolders with one
+            placeholder for the iteration number (default "global_step_{}").
+
+    Returns:
+        str or None: Full path to the latest checkpoint directory, or
+        None if the tracker or checkpoint folder is missing.
+    """
     if path is None:
         return None
 

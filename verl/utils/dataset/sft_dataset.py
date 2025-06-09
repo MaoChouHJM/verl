@@ -45,9 +45,11 @@ class SFTDataset(Dataset):
         response_dict_keys = config.get("response_dict_keys", None)
         max_length = config.get("max_length", 1024)
         truncation = config.get("truncation", "error")
+        use_shm = config.get('use_shm', False)
 
         assert truncation in ["error", "left", "right"]
         self.truncation = truncation
+        self.use_shm = use_shm
 
         if not isinstance(parquet_files, List):
             parquet_files = [parquet_files]
@@ -69,7 +71,7 @@ class SFTDataset(Dataset):
 
     def _download(self):
         for i, parquet_file in enumerate(self.parquet_files):
-            self.parquet_files[i] = copy_to_local(parquet_file, verbose=True)
+            self.parquet_files[i] = copy_to_local(parquet_file, verbose=True, use_shm=self.use_shm)
 
     def _read_files_and_tokenize(self):
         def series_to_item(ls):
@@ -92,18 +94,22 @@ class SFTDataset(Dataset):
             # type(x[0]): numpy.ndarray
             # type(x[0][0]): dict
             try:
-                self.prompts = self.prompts.apply(lambda x: series_to_item(x)[key], axis=1)
+                self.prompts = self.prompts.apply(lambda x: series_to_item(x)[key], axis=1)  # noqa: B023
             except Exception:
                 print(f"self.prompts={self.prompts}")
                 raise
+        if isinstance(self.prompts, pd.DataFrame):
+            self.prompts = self.prompts.squeeze()
         self.prompts = self.prompts.tolist()
         self.responses = self.dataframe[self.response_key]
         for key in self.response_dict_keys:
             try:
-                self.responses = self.responses.apply(lambda x: series_to_item(x)[key], axis=1)
+                self.responses = self.responses.apply(lambda x: series_to_item(x)[key], axis=1)  # noqa: B023
             except Exception:
                 print(f"self.responses={self.responses}")
                 raise
+        if isinstance(self.responses, pd.DataFrame):
+            self.responses = self.responses.squeeze()
         self.responses = self.responses.tolist()
 
     def __len__(self):
@@ -140,10 +146,7 @@ class SFTDataset(Dataset):
         # padding to max length
         sequence_length = input_ids.shape[0]
         if sequence_length < self.max_length:
-            padded_input_ids = (
-                torch.ones(size=(self.max_length - sequence_length,), dtype=input_ids.dtype)
-                * self.tokenizer.pad_token_id
-            )
+            padded_input_ids = torch.ones(size=(self.max_length - sequence_length,), dtype=input_ids.dtype) * self.tokenizer.pad_token_id
             padded_attention_mask = torch.zeros(size=(self.max_length - sequence_length,), dtype=attention_mask.dtype)
 
             input_ids = torch.cat((input_ids, padded_input_ids))

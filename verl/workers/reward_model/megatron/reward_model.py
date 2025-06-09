@@ -15,6 +15,8 @@
 Megatron Reward Model.
 """
 
+import itertools
+
 import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
@@ -22,8 +24,9 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from tensordict import TensorDict
 
 from verl import DataProto
-from verl.utils.megatron.pipeline_parallel import compute_transformers_input_shapes, make_batch_generator
-from verl.utils.torch_functional import broadcast_dict_tensor, pad_sequence_to_length, split_dict_tensor_into_batches
+from verl.utils.megatron.pipeline_parallel import make_batch_generator
+from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
+from verl.utils.torch_functional import broadcast_dict_tensor, pad_sequence_to_length
 from verl.workers.reward_model.base import BasePPORewardModel
 
 
@@ -48,7 +51,9 @@ class MegatronRewardModel(BasePPORewardModel):
         self.rm_tokenizer = rm_tokenizer
         self.use_different_tokenizer = rm_tokenizer is not None
 
-        if self.config.param_offload:
+        print(f"MegatronRewardModel.config: {self.config}")
+
+        if self.config.megatron.param_offload:
             self.offload_params_to_cpu()
 
     def re_encode_by_rm_tokenizer(self, data: DataProto) -> DataProto:
@@ -62,7 +67,7 @@ class MegatronRewardModel(BasePPORewardModel):
         attention_mask = data.batch["attention_mask"]
         position_ids = data.batch["position_ids"]
         ori_values = {"input_ids": input_ids, "attention_mask": attention_mask, "position_ids": position_ids}
-        ori_bs, ori_seqlen = input_ids.size(0), input_ids.size(1)
+        _, ori_seqlen = input_ids.size(0), input_ids.size(1)
         input_ids_for_rm = []
         attention_mask_for_rm = []
         position_ids_for_rm = []
@@ -76,23 +81,17 @@ class MegatronRewardModel(BasePPORewardModel):
             # 2. decode by sft_tokenizer, remove sft system prompts
             decode_result = self.sft_tokenizer.decode(valid_id)
             # workaround
-            decode_with_rm_chat = (
-                decode_result.replace("<|user|>\n", "[INST] ")
-                .replace("</s>\n<|assistant|>\n", " [/INST]")
-                .replace("</s> \n<|assistant|>\n", " [/INST]")
-                + "</s>"
-            )
+            decode_with_rm_chat = decode_result.replace("<|user|>\n", "[INST] ").replace("</s>\n<|assistant|>\n", " [/INST]").replace("</s> \n<|assistant|>\n", " [/INST]") + "</s>"
             if print_decode and torch.distributed.get_rank() == 0:
                 # only print first decode result
                 print(
                     f"device {torch.cuda.current_device()}: sft decode result:\n{decode_result}\n \
-                        \ndevice {torch.cuda.current_device()}: sft decode result with rm chat template:\n{decode_with_rm_chat}\n\n"
+                        \ndevice {torch.cuda.current_device()}: sft decode result with \
+                        rm chat template:\n{decode_with_rm_chat}\n\n"
                 )
                 print_decode = False
             # 3. encode by rm_tokenizer
-            rm_input_ids = self.rm_tokenizer(decode_with_rm_chat, return_tensors="pt")["input_ids"][0].to(
-                input_ids.device
-            )
+            rm_input_ids = self.rm_tokenizer(decode_with_rm_chat, return_tensors="pt")["input_ids"][0].to(input_ids.device)
             # 4. generate attention_mask and position_ids
             rm_attention_mask = torch.ones_like(rm_input_ids, device=input_ids.device)
             cur_seqlen = rm_input_ids.shape[-1]
@@ -123,7 +122,7 @@ class MegatronRewardModel(BasePPORewardModel):
 
     @torch.no_grad()
     def compute_reward(self, data: DataProto) -> DataProto:
-        if self.config.param_offload:
+        if self.config.megatron.param_offload:
             self.load_params_to_cuda()
 
         if self.use_different_tokenizer:
@@ -132,21 +131,35 @@ class MegatronRewardModel(BasePPORewardModel):
         input_ids = data.batch["input_ids"]  # (bs, seq_len')
         attention_mask = data.batch["attention_mask"]
         position_ids = data.batch["position_ids"]
+        use_dynamic_bsz = data.meta_info.get("use_dynamic_bsz", False)
+        micro_batch_size = data.meta_info.get("micro_batch_size", None)
+        max_token_len = data.meta_info.get("max_token_len", None)
+        assert micro_batch_size is not None, "micro batch size is needed for forward compute"
+        if use_dynamic_bsz:
+            assert max_token_len is not None, "use_dynamic_bsz is True, but max_token_len is None!"
+            max_token_len = max_token_len * self.config.megatron.context_parallel_size
 
         responses = data.batch["responses"]
         batch_size = responses.size(0)
         response_length = responses.size(1)
 
         with torch.no_grad():
-            output = self.forward_batch(data)
+            output = self.forward_batch(data, use_dynamic_bsz=use_dynamic_bsz, micro_batch_size=micro_batch_size, max_token_len=max_token_len)
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                logits = torch.cat([output], dim=0)
+                logits = torch.cat(output["output"], dim=0)
+                if use_dynamic_bsz:
+                    indices = output["indices"]
+                    indices = list(itertools.chain.from_iterable(indices))
+                    assert len(indices) == logits.size(0), f"{len(indices)} vs. {logits.size()}"
+                    revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+                    logits = logits[revert_indices]
             else:
                 logits = torch.empty(
                     (input_ids.shape[0], input_ids.shape[1]),
-                    dtype=torch.bfloat16,  # TODO(sgm): check why is bfloat16
                     device=input_ids.device,
                 )
+            logits = logits.to(torch.float32)
+
             # broadcast across pp ranks
             torch.distributed.broadcast(
                 tensor=logits,
@@ -177,7 +190,7 @@ class MegatronRewardModel(BasePPORewardModel):
         token_level_rewards = token_level_rewards * eos_mask
         token_level_rewards = token_level_rewards[:, -response_length:]
 
-        if self.config.param_offload:
+        if self.config.megatron.param_offload:
             self.offload_params_to_cpu()
         else:
             # add empty cache after each compute
@@ -187,7 +200,7 @@ class MegatronRewardModel(BasePPORewardModel):
 
         return DataProto(batch=batch)
 
-    def forward_batch(self, data: DataProto):
+    def forward_batch(self, data: DataProto, use_dynamic_bsz=False, micro_batch_size=None, max_token_len=None):
         """
         We assume:
         - The model takes input: (input_ids, attention_mask, position_ids). No rmpad for the input
@@ -195,35 +208,35 @@ class MegatronRewardModel(BasePPORewardModel):
         """
         # broadcast from last pp rank to all other pp ranks
         # TODO: actually, we just need to control the sampling order.
-        data.batch = data.batch.contiguous()
-        broadcast_dict_tensor(
-            data.batch, src=mpu.get_pipeline_model_parallel_last_rank(), group=mpu.get_pipeline_model_parallel_group()
-        )
+        mini_batch = data
+        mini_batch.batch = mini_batch.batch.contiguous()
+        broadcast_dict_tensor(mini_batch.batch, src=mpu.get_pipeline_model_parallel_last_rank(), group=mpu.get_pipeline_model_parallel_group())
 
-        # split into micro-batches
-        if self.config is not None and "ppo_micro_batch_size_per_gpu" in self.config:
-            infer_batch_size = self.config.ppo_micro_batch_size_per_gpu
+        mini_batch.batch["attention_mask"] = mini_batch.batch["attention_mask"].to(bool)
+
+        indices = None
+        if use_dynamic_bsz:
+            assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
+            vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
+            if vpp_size is not None and vpp_size > 1:
+                microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
+                micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, num_batches_divided_by=microbatch_group_size_per_vp_stage, max_token_len=max_token_len)
+                assert len(micro_batches) % self.tf_config.microbatch_group_size_per_vp_stage == 0, f"micro_batches {micro_batches} must be divisible by microbatch_group_size_per_vp_stage {microbatch_group_size_per_vp_stage} for megatron backend"
+            else:
+                micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, max_token_len=max_token_len)
+            total_seqlen = max_token_len
         else:
-            infer_batch_size = data.batch.batch_size[0]
+            assert micro_batch_size is not None, "micro_batch_size is needed to be passed in when not using dynamic batch size"
+            micro_batches = mini_batch.batch.split(micro_batch_size)
+            seq_len = micro_batches[0]["input_ids"].shape[1]
+            total_seqlen = micro_batch_size * seq_len
+        n_micro_batch = len(micro_batches)
 
-        data.batch["attention_mask"] = data.batch["attention_mask"].to(bool)
-        batches = split_dict_tensor_into_batches(data.batch, batch_size=infer_batch_size)
-        n_micro_batch = len(batches)
-        seq_len = batches[0]["input_ids"].shape[1]
-
-        # compute input shapes for pp stages
-        input_shapes = compute_transformers_input_shapes(
-            batches,
-            meta_info={
-                "sequence_parallel": self.tf_config.sequence_parallel,
-                "hidden_size": self.model_config.hidden_size,
-            },
-        )
         # compute input shapes for pp stages
         forward_backward_func = get_forward_backward_func()
 
         def loss_func(output):
-            return 1.0, {"logits": output}
+            return torch.tensor(1.0, device=output.device), output
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -246,7 +259,7 @@ class MegatronRewardModel(BasePPORewardModel):
             return output, loss_func
 
         # batch should be a list of batches inside micro-batches
-        batch_generator = make_batch_generator(batches, vpp_size=len(self.reward_model_module))
+        batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.reward_model_module))
 
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
@@ -256,7 +269,7 @@ class MegatronRewardModel(BasePPORewardModel):
                 data_iterator=batch_generator,
                 model=self.reward_model_module,
                 num_microbatches=n_micro_batch,
-                seq_length=infer_batch_size * seq_len,  # no use when input_shapes was set
+                seq_length=total_seqlen,  # no use when input_shapes was set
                 micro_batch_size=1,  # no use when input_shapes was set
                 forward_only=True,
             )
@@ -266,12 +279,14 @@ class MegatronRewardModel(BasePPORewardModel):
                 data_iterator=batch_generator,
                 model=self.reward_model_module,
                 num_microbatches=n_micro_batch,
-                seq_length=infer_batch_size * seq_len,  # in use for pp = 1
+                seq_length=total_seqlen,  # in use for pp = 1
                 micro_batch_size=1,  # in use for pp = 1
                 forward_only=True,
             )
         # loss_reduces contains the stats returned from loss_func
-
+        losses_reduced = {"output": losses_reduced}
+        if use_dynamic_bsz:
+            losses_reduced["indices"] = indices
         return losses_reduced
 
     def offload_params_to_cpu(self):

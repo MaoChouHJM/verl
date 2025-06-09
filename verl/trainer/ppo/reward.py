@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import multiprocessing
 import os
+from functools import partial
 
 import ray
 
 from verl import DataProto
+from verl.utils.reward_score import default_compute_score
 
 
 def get_custom_reward_fn(config):
@@ -66,15 +69,11 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
         reward_manager_cls = NaiveRewardManager
     elif reward_manager_name == "prime":
         from verl.workers.reward_manager import PrimeRewardManager
-
         reward_manager_cls = PrimeRewardManager
     elif reward_manager_name == "batch":
         from verl.workers.reward_manager import BatchRewardManager
-
-        reward_manager_cls = BatchRewardManager
     elif reward_manager_name == "dapo":
         from verl.workers.reward_manager import DAPORewardManager
-
         reward_manager_cls = DAPORewardManager
     elif reward_manager_name == "keye":
         from verl.workers.reward_manager import KeyeRewardManager
