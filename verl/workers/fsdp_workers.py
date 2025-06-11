@@ -344,7 +344,7 @@ class ActorRolloutRefWorker(Worker):
                     mixed_precision=mixed_precision,
                     sync_module_states=True,
                     device_mesh=self.device_mesh,
-                    forward_prefetch=False,
+                    forward_prefetch=self.config.actor.fsdp_config.forward_prefetch,
                 )
             elif fsdp_strategy == "fsdp2":
                 assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
@@ -354,26 +354,13 @@ class ActorRolloutRefWorker(Worker):
                     self._is_offload_param = False
                     self._is_offload_optimizer = False
                 else:
-                    cpu_offload = None if role == "actor" else CPUOffloadPolicy(pin_memory=True)
+                    raise NotImplementedError(f"not implement {fsdp_strategy}")
 
-                fsdp_kwargs = {
-                    "mesh": fsdp_mesh,
-                    "mp_policy": mp_policy,
-                    "offload_policy": cpu_offload,
-                    "reshard_after_forward": fsdp_config.reshard_after_forward,
-                }
-                full_state = actor_module.state_dict()
-                apply_fsdp2(actor_module, fsdp_kwargs, fsdp_config)
-                fsdp2_load_full_state_dict(actor_module, full_state, fsdp_mesh, cpu_offload)
-                actor_module_fsdp = actor_module
-            else:
-                raise NotImplementedError(f"not implement {fsdp_strategy}")
+                if enable_activation_offload:
+                    enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 
-            if enable_activation_offload:
-                enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
-
-            log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
-            actor_module_fsdp.processor = self.processor
+                log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
+                actor_module_fsdp.processor = self.processor
 
         # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
@@ -531,6 +518,8 @@ class ActorRolloutRefWorker(Worker):
             override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
 
             use_remove_padding = self.config.model.get("use_remove_padding", False)
+            use_shm = self.config.model.get("use_shm", False)
+            use_fused_kernels = self.config.model.get("use_fused_kernels", False)
 
             if self._is_actor or self._is_rollout:
                 # we need the model for actor and rollout
@@ -540,115 +529,86 @@ class ActorRolloutRefWorker(Worker):
                 else:
                     optim_config = None
                     fsdp_config = OmegaConf.create()
-                with self.timing_record("init_model/build_actor_fsdp_model_optimizer"):
-                    self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = (
-                        self._build_model_optimizer(
-                            model_path=self.config.model.path,
-                            fsdp_config=fsdp_config,
-                            optim_config=optim_config,
-                            override_model_config=override_model_config,
-                            use_remove_padding=use_remove_padding,
-                            enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
-                            trust_remote_code=self.config.model.get("trust_remote_code", False),
-                            use_liger=self.config.model.get("use_liger", False),
-                            role="actor",
-                        )
-                    )
 
-                use_shm = self.config.model.get("use_shm", False)
-                use_fused_kernels = self.config.model.get("use_fused_kernels", False)
-
-                if self._is_offload_optimizer:
-                    with self.timing_record("init_model/offload_optimizer"):
-                        offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-                        log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
-            # load from checkpoint
-            if self._is_actor:
-                optim_config = self.config.actor.optim
-                fsdp_config = self.config.actor.fsdp_config
-            else:
-                optim_config = None
-                fsdp_config = OmegaConf.create()
-
-            local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
-            (
-                self.actor_module_fsdp,
-                self.actor_optimizer,
-                self.actor_lr_scheduler,
-                self.actor_model_config,
-            ) = self._build_model_optimizer(
-                model_path=local_path,
-                fsdp_config=fsdp_config,
-                optim_config=optim_config,
-                override_model_config=override_model_config,
-                use_remove_padding=use_remove_padding,
-                use_fused_kernels=use_fused_kernels,
-                enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
-                trust_remote_code=self.config.model.get("trust_remote_code", False),
-                use_liger=self.config.model.get("use_liger", False),
-                role="actor",
-                enable_activation_offload=self.config.model.get("enable_activation_offload", False),
-            )
-
-            # get the original unwrapped module
-            if fsdp_version(self.actor_module_fsdp) == 1:
-                self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
-
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                log_gpu_memory_usage("After offload actor model during init", logger=logger)
-
-            if self._is_offload_optimizer:
-                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-                log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
-        # load from checkpoint
-        if self._is_actor:
-            OmegaConf.set_struct(self.config.actor, True)
-            with open_dict(self.config.actor):
-                self.config.actor.use_remove_padding = use_remove_padding
-                self.config.actor.use_fused_kernels = use_fused_kernels
-            with self.timing_record("init_model/build_actor_wrapper"):
-                self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
-
-        if self._is_rollout:
-            with self.timing_record("init_model/build_rollout"):
-                self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
-
-        if self._is_ref:
-            local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
-            with self.timing_record("init_model/build_ref_fsdp_model_optimizer"):
-                self.ref_module_fsdp = self._build_model_optimizer(
+                local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
+                (
+                    self.actor_module_fsdp,
+                    self.actor_optimizer,
+                    self.actor_lr_scheduler,
+                    self.actor_model_config,
+                ) = self._build_model_optimizer(
                     model_path=local_path,
-                    fsdp_config=self.config.ref.fsdp_config,
-                    optim_config=None,
+                    fsdp_config=fsdp_config,
+                    optim_config=optim_config,
                     override_model_config=override_model_config,
                     use_remove_padding=use_remove_padding,
                     use_fused_kernels=use_fused_kernels,
+                    enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
                     trust_remote_code=self.config.model.get("trust_remote_code", False),
                     use_liger=self.config.model.get("use_liger", False),
-                    role="ref",
-                )[0]
-            OmegaConf.set_struct(self.config.ref, True)
-            with open_dict(self.config.ref):
-                self.config.ref.use_remove_padding = use_remove_padding
-                self.config.ref.use_fused_kernels = use_fused_kernels
-            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
-
-        if self._is_actor:
-            with self.timing_record("init_model/setup_flops_and_ckpt"):
-                self.flops_counter = FlopsCounter(self.actor_model_config)
-                self.checkpoint_manager = FSDPCheckpointManager(
-                    model=self.actor_module_fsdp,
-                    optimizer=self.actor.actor_optimizer,
-                    lr_scheduler=self.actor_lr_scheduler,
-                    processing_class=self.processor if self.processor is not None else self.tokenizer,
-                    checkpoint_contents=self.config.actor.checkpoint.contents,
+                    role="actor",
+                    enable_activation_offload=self.config.model.get("enable_activation_offload", False),
                 )
+
+                # get the original unwrapped module
+                if fsdp_version(self.actor_module_fsdp) == 1:
+                    self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
+
+                if self._is_offload_param:
+                    offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+                    log_gpu_memory_usage("After offload actor model during init", logger=logger)
+
+                if self._is_offload_optimizer:
+                    offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+                    log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
+            # load from checkpoint
+            if self._is_actor:
+                OmegaConf.set_struct(self.config.actor, True)
+                with open_dict(self.config.actor):
+                    self.config.actor.use_remove_padding = use_remove_padding
+                    self.config.actor.use_fused_kernels = use_fused_kernels
+                with self.timing_record("init_model/build_actor_wrapper"):
+                    self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
+
+            if self._is_rollout:
+                with self.timing_record("init_model/build_rollout"):
+                    self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+
+            if self._is_ref:
+                local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
+                with self.timing_record("init_model/build_ref_fsdp_model_optimizer"):
+                    self.ref_module_fsdp = self._build_model_optimizer(
+                        model_path=local_path,
+                        fsdp_config=self.config.ref.fsdp_config,
+                        optim_config=None,
+                        override_model_config=override_model_config,
+                        use_remove_padding=use_remove_padding,
+                        use_fused_kernels=use_fused_kernels,
+                        trust_remote_code=self.config.model.get("trust_remote_code", False),
+                        use_liger=self.config.model.get("use_liger", False),
+                        role="ref",
+                    )[0]
+                OmegaConf.set_struct(self.config.ref, True)
+                with open_dict(self.config.ref):
+                    self.config.ref.use_remove_padding = use_remove_padding
+                    self.config.ref.use_fused_kernels = use_fused_kernels
+                self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+
+            if self._is_actor:
+                with self.timing_record("init_model/setup_flops_and_ckpt"):
+                    self.flops_counter = FlopsCounter(self.actor_model_config)
+                    self.checkpoint_manager = FSDPCheckpointManager(
+                        model=self.actor_module_fsdp,
+                        optimizer=self.actor.actor_optimizer,
+                        lr_scheduler=self.actor_lr_scheduler,
+                        processing_class=self.processor if self.processor is not None else self.tokenizer,
+                        checkpoint_contents=self.config.actor.checkpoint.contents,
+                    )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         # Support all hardwares
-        data = data.to(get_torch_device().current_device())
+        data = data.to('cpu')  # data will to device with each micro batch on actor.update_policy
 
         assert self._is_actor
         if self._is_offload_param:
@@ -1049,7 +1009,7 @@ class CriticWorker(Worker):
                 sharding_strategy=sharding_strategy,
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
-                forward_prefetch=False,
+                forward_prefetch=self.config.model.fsdp_config.forward_prefetch,
                 device_mesh=self.device_mesh,
                 cpu_offload=None,
             )
@@ -1345,7 +1305,7 @@ class RewardModelWorker(Worker):
                 sharding_strategy=sharding_strategy,  # zero3
                 sync_module_states=True,
                 cpu_offload=CPUOffload(offload_params=True),
-                forward_prefetch=False,
+                forward_prefetch=self.config.model.fsdp_config.forward_prefetch,
                 device_mesh=self.device_mesh,
             )
         elif config.strategy == "fsdp2":
