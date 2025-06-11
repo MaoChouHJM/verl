@@ -23,6 +23,7 @@ import torch
 import torch.distributed
 from megatron.core import parallel_state as mpu
 from torch import nn
+from contextlib import contextmanager
 
 from verl import DataProto
 from verl.models.mcore.weight_converter import McoreToHFWeightConverterBase
@@ -90,6 +91,7 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         self.train_etp_group = mpu.get_expert_tensor_parallel_group()
         self.need_tp_reshard = self.train_tp_size != self.infer_tp_size
         self.train_tp_larger = self.train_tp_size > self.infer_tp_size
+        self.timing_data = {}
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):
@@ -156,3 +158,20 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         if self.infer_tp_size == 1:
             return data
         return data.chunk(chunks=self.infer_tp_size)[self.infer_tp_rank]
+
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            #wandb.log({method_name : duration})
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+                #wandb.log({name : v})
