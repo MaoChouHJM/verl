@@ -39,8 +39,9 @@ for i in range(parquet_file.num_row_groups):
     for index, row in df_row_group.iterrows():
         # 注意这里的 index 是行组内的索引
         global_index = total_rows_processed + index
-        if len(row.to_dict()['images']) != 1:
-            print("数据:", len(row.to_dict()['images']))
+        #if len(row.to_dict()['images']) != 1:
+        #    print("数据:", len(row.to_dict()['images']))
+        print(row.to_dict())
     total_rows_processed += len(df_row_group)
 
 print(f'{total_rows_processed=}')

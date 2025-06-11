@@ -788,8 +788,11 @@ class RayPPOTrainer:
             self._report_timing_stat()
         if self.use_rm_worker:
             self.rm_worker_wg = all_wg['rm_worker']
+            self._report_timing_stat()
     
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+        self._report_timing_stat()
+
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
         self._report_timing_stat()
@@ -801,7 +804,8 @@ class RayPPOTrainer:
 
             self.async_rollout_mode = True
             self.async_rollout_manager = AsyncLLMServerManager(
-                config=self.config.actor_rollout_ref,
+                #config=self.config.actor_rollout_ref,
+                config=self.config,
                 worker_group=self.actor_rollout_wg,
             )
 

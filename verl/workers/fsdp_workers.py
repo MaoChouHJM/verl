@@ -179,6 +179,7 @@ class ActorRolloutRefWorker(Worker):
         role="actor",
         enable_activation_offload=False,
     ):
+
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
@@ -235,28 +236,37 @@ class ActorRolloutRefWorker(Worker):
                     actor_module_class = AutoModelForCausalLM
 
 
-                from recovlm.models.keye.modeling_keye import KeyeForConditionalGeneration
-                
-                if isinstance(actor_model_config, transformers.models.Keye.configuration_keye.KeyeConfig):
-                    actor_module_class = KeyeForConditionalGeneration
 
                 with self.timing_record("init_model/build_actor_fsdp/init_context/from_pretrained"):
-                    if actor_module_class != KeyeForConditionalGeneration:
-                        actor_module = actor_module_class.from_pretrained(
-                            pretrained_model_name_or_path=local_path,
-                            torch_dtype=torch_dtype,
-                            config=actor_model_config,
-                            attn_implementation="flash_attention_2",
-                            trust_remote_code=trust_remote_code,
-                        )
-                    else: 
-                        actor_module = actor_module_class.from_pretrained(
-                            local_path,
-                            _attn_implementation="flash_attention_2",
-                            use_cache = False,
-                            ignore_mismatched_sizes=True
-                        )
-                        actor_module.processor = self.processor
+                    try:
+                        from recovlm.models.keye.modeling_keye import KeyeForConditionalGeneration
+                        
+                        if isinstance(actor_model_config, transformers.models.Keye.configuration_keye.KeyeConfig):
+                            actor_module_class = KeyeForConditionalGeneration
+                            actor_module = actor_module_class.from_pretrained(
+                                    pretrained_model_name_or_path=local_path,
+                                    torch_dtype=torch_dtype,
+                                    config=actor_model_config,
+                                    attn_implementation="flash_attention_2",
+                                    trust_remote_code=trust_remote_code,
+                                )
+                        else: 
+                            actor_module = actor_module_class.from_pretrained(
+                                local_path,
+                                _attn_implementation="flash_attention_2",
+                                use_cache = False,
+                                ignore_mismatched_sizes=True
+                            )
+                            actor_module.processor = self.processor
+                    except:
+                            actor_module = actor_module_class.from_pretrained(
+                                local_path,
+                                _attn_implementation="flash_attention_2",
+                                use_cache = False,
+                                ignore_mismatched_sizes=True
+                            )
+                            actor_module.processor = self.processor
+                         
 
                 if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                     from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -276,7 +286,7 @@ class ActorRolloutRefWorker(Worker):
                     actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
         # freeze visual tower
-        if self.config.actor.freeze_vision_tower:
+        if self.config.actor.get("freeze_vision_tower", False):
             if hasattr(actor_module, "visual"):
                 actor_module.visual.requires_grad_(False)
                 fsdp_config.use_orig_params = True

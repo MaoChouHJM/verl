@@ -49,6 +49,8 @@ def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging
         mem_allocated, mem_reserved, mem_used, mem_total = _get_current_mem_info()
         message = f"{head}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, device memory used/total (GB): {mem_used}/{mem_total}"
 
+
+        print(message, flush=True)
         if logger is None:
             print(message)
         else:
@@ -66,7 +68,7 @@ class GPUMemoryLogger(DecoratorLoggerBase):
         ...     return
     """
 
-    def __init__(self, role: str, logger: logging.Logger = None, level=logging.DEBUG, log_only_rank_0: bool = True):
+    def __init__(self, role: str, logger: logging.Logger = None, level=logging.INFO, log_only_rank_0: bool = True):
         if dist.is_initialized() and dist.get_world_size() > 1:
             rank = dist.get_rank()
         else:
