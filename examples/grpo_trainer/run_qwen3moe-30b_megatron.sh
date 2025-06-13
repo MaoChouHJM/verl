@@ -3,20 +3,11 @@ set -x
 HOME=/nlp_group/huangjiaming/
 
 # moe ckpt
-#HF_MODEL_PATH=/nlp_group/huangjiaming/Qwen3-30B-A3B
-#DIST_CKPT_PATH=/nlp_group/huangjiaming/Qwen3-30B-A3B-mcore
+HF_MODEL_PATH=/nlp_group/huangjiaming/Qwen3-30B-A3B
+DIST_CKPT_PATH=/nlp_group/huangjiaming/Qwen3-30B-A3B-mcore
 
-
-# vlm ckpt
-HF_MODEL_PATH=/nlp_group/huangjiaming/Qwen2.5-VL-7B-Instruct
-DIST_CKPT_PATH=/nlp_group/huangjiaming/Qwen2.5-VL-7B-Instruct-mcore
-
-# for rapid reproduce
-#HF_MODEL_PATH=$HOME/Qwen2-7B-Instruct
-#DIST_CKPT_PATH=$HOME/Qwen2-7B-Instruct-mcore-test
-
-/opt/conda/envs/py310/bin/python  converter_hf_to_mcore.py --hf_model_path $HF_MODEL_PATH --output_path $DIST_CKPT_PATH
-exit 0
+#/opt/conda/envs/py310/bin/python  converter_hf_to_mcore.py --hf_model_path $HF_MODEL_PATH --output_path $DIST_CKPT_PATH
+#exit 0
 
 # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
 # export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -75,7 +66,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo --config-path=config \
     ++reward_model.enable_reward_workers=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.logger=['console'] \
     trainer.project_name='verl_grpo_example_gsm8k_math' \
     trainer.experiment_name='qwen3_30b_moe_megatron' \

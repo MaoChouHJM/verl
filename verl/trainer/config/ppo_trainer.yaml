@@ -685,6 +685,9 @@ reward_model:
   # Maximum sequence length to process for scoring
   max_length: null
 
+  # enable dist reward worker
+  enable_reward_workers: False
+
   # Sequence parallelism size for Ulysses-style model parallelism
   ulysses_sequence_parallel_size: 1
 
