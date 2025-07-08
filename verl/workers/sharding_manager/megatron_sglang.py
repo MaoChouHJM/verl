@@ -81,7 +81,6 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         transformer_config,
         layer_name_mapping,
         weight_converter,
-        offload_param,
         device_mesh: DeviceMesh | None = None,
         offload_param: bool = False,
         bridge=None,
@@ -136,14 +135,14 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         # named_tensors = [(k, v) for k, v in params.items()]
         named_tensors = params
         load_format = None
-        with _timer("weight_update_total", timing):
+        with simple_timer("weight_update_total", timing):
             start_time = time.time()
             for tensor_index, (name, tensor) in enumerate(named_tensors):
                 cur_time = time.time()
                 timing[f'generate_weight_{name}'] = cur_time - start_time
                 timing[f'weight_shape_{name}'] = tensor.shape
                 timing[f'weight_dtype_{name}'] = tensor.dtype
-                with _timer(f"update_tensor_{name}", timing):
+                with simple_timer(f"update_tensor_{name}", timing):
                     if self.device_mesh["tp"].get_local_rank() == 0:
                         success, sglang_time = await self.inference_engine.update_weights_from_tensor(
                             named_tensors=[
@@ -156,10 +155,14 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                             flush_cache=False,
                         )
                         timing[f'sglang_cost_time_{name}'] = sglang_time
-                with _timer(f"flush_cache_{name}", timing):
+                with simple_timer(f"flush_cache_{name}", timing):
                     if self.device_mesh["tp"].get_local_rank() == 0:
                         await self.inference_engine.flush_cache()
                 start_time = time.time()
+
+            with simple_timer(f"post_update_weight", timing):
+                if self.device_mesh["tp"].get_local_rank() == 0:
+                    await self.inference_engine.post_load_weights_from_tensor()
 
         if not hasattr(self, '_first_call_update_weights') or not self._first_call_update_weights:
             self._first_call_update_weights = True
@@ -169,7 +172,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                 from datetime import datetime
                 now = datetime.now()
                 formatted_date_time = now.strftime("%Y-%m-%d_%H_%M_%S")
-                dump_file = os.getcwd() + f"/cost_{formatted_date_time}.pkl"
+                dump_file = os.path.dirname(os.path.abspath(__file__)) + f"/cost_{formatted_date_time}.pkl"
                 with open(dump_file, 'wb') as f:
                     pickle.dump(timing, f) 
                     print(f'update_weights_from_tensor perf file: {dump_file} has dumped')

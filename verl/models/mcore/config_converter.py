@@ -410,7 +410,7 @@ def hf_to_mcore_config_dpskv3(
         # Return config.
         return kw_args
 
-    transformer_config = MLATransformerConfig(**core_transformer_config_from_args(config_args))
+    transformer_config = MLATransformerConfig(**core_transformer_config_from_args(args))
     import dataclasses, json
     config_dict = dataclasses.asdict(transformer_config)
     json_str = json.dumps(config_dict, indent=4, default=lambda o: str(o), sort_keys=True)

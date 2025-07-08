@@ -18,6 +18,9 @@ import os
 import random
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Type
+import time
+from contextlib import contextmanager
+
 
 import numpy as np
 import ray
@@ -321,6 +324,7 @@ class AgentLoopManager:
         """
         self.config = config
         self.worker_group = worker_group
+        self.timing_data = {}
 
         self._initialize_llm_servers()
         self._init_agent_loop_workers()
@@ -435,8 +439,38 @@ class AgentLoopManager:
 
     def wake_up(self):
         """Wake up all rollout server instances."""
-        ray.get([server.wake_up.remote() for server in self.async_llm_servers])
+        with self.timing_record("async_server/wake_up"):
+            ray.get([server.wake_up.remote() for server in self.async_llm_servers])
 
     def sleep(self):
         """Sleep all rollout server instances."""
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
+        with self.timing_record("async_server/sleep"):
+            ray.get([server.sleep.remote() for server in self.async_llm_servers])
+
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            #wandb.log({method_name : duration})
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+                #wandb.log({name : v})
+
+    def get_timing_report(self):
+        if self.timing_data == {}:
+            return
+        host_port = "localhost" + ":" + "100"
+        res = {}
+        from copy import deepcopy
+        res[host_port] = deepcopy(self.timing_data)
+        self.timing_data.clear()
+        return [res]
+

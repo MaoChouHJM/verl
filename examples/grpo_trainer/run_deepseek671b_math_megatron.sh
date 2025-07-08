@@ -59,7 +59,6 @@ fi
 
 #    +actor_rollout_ref.rollout.override_config.dp_size=$INFER_TP \
 #    +actor_rollout_ref.rollout.override_config.enable_dp_attention=True \
-
 #    +actor_rollout_ref.rollout.override_config.enable_dp_lm_head=True \
 
 
@@ -95,6 +94,9 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     +actor_rollout_ref.rollout.override_config.moe_dense_tp_size=1 \
     +actor_rollout_ref.rollout.override_config.enable_deepep_moe=True \
     +actor_rollout_ref.rollout.override_config.deepep_mode=normal \
+    +actor_rollout_ref.rollout.override_config.dp_size=$INFER_TP \
+    +actor_rollout_ref.rollout.override_config.enable_dp_attention=True \
+    +actor_rollout_ref.rollout.override_config.enable_dp_lm_head=True \
     algorithm.use_kl_in_reward=False \
     trainer.logger=['console'] \
     trainer.project_name='verl_megatron_gsm8k_examples' \
