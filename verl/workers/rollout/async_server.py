@@ -18,9 +18,9 @@ import socket
 import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Tuple, Type
 import time
 from contextlib import contextmanager
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import fastapi
 import ray
@@ -85,6 +85,20 @@ class AsyncServerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def generate(self, prompt_ids: List[int], sampling_params: Dict[str, Any], request_id: str) -> List[int]:
+        """Generate response ids given prompt ids.
+
+        Args:
+            prompt_ids (List[int]): prompt ids
+            sampling_params (Dict[str, Any]): sampling params
+            request_id (str): request id
+
+        Returns:
+            List[int]: response ids
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def init_engine(self):
         """Init async LLM engine."""
         raise NotImplementedError
@@ -124,9 +138,14 @@ class AsyncLLMServerManager:
         self.async_llm_servers = [None] * self.rollout_dp_size
         self.server_addresses = [None] * self.rollout_dp_size
 
-        server_class = async_server_class(
-            rollout_backend=self.config.rollout.name,
-        )
+        if self.config.rollout.agent.custom_async_server:
+            server_class = async_server_class(
+                rollout_backend=self.config.rollout.name,
+                rollout_backend_module=self.config.rollout.agent.custom_async_server.path,
+                rollout_backend_class=self.config.rollout.agent.custom_async_server.name,
+            )
+        else:
+            server_class = async_server_class(rollout_backend=self.config.rollout.name)
 
         # Start all server instances, restart if address already in use.
         unready_dp_ranks = set(range(self.rollout_dp_size))
@@ -158,6 +177,7 @@ class AsyncLLMServerManager:
 
         # Init user provided chat scheduler in sperate thread.
         self.chat_scheduler: ChatCompletionScheduler = None
+        self.chat_scheduler_exception: Exception = None
         self.chat_scheduler_loop = None
         self.chat_scheduler_ready = threading.Event()
         self.chat_scheduler_thread = threading.Thread(target=self._init_chat_scheduler, daemon=True)
@@ -169,23 +189,29 @@ class AsyncLLMServerManager:
         self.chat_scheduler_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.chat_scheduler_loop)
 
-        self.chat_scheduler = ChatCompletionScheduler(
-            config=self.full_config,
-            server_addresses=self.server_addresses,
-        )
-
-        self.chat_scheduler_ready.set()
+        try:
+            self.chat_scheduler = ChatCompletionScheduler(
+                config=self.full_config,
+                server_addresses=self.server_addresses,
+            )
+        except Exception as e:
+            logger.exception(f"chat_scheduler init error: {e}")
+            self.chat_scheduler_exception = e
+        finally:
+            self.chat_scheduler_ready.set()
         self.chat_scheduler_loop.run_forever()
 
     def wake_up(self):
         """Wake up all vllm instances."""
         with self.timing_record("async_server/wake_up"):
-            ray.get([server.wake_up.remote() for server in self.async_llm_servers])
+            if self.config.rollout.free_cache_engine:
+                ray.get([server.wake_up.remote() for server in self.async_llm_servers])
 
     def sleep(self):
         """Sleep all vllm instances."""
         with self.timing_record("async_server/sleep"):
-            ray.get([server.sleep.remote() for server in self.async_llm_servers])
+            if self.config.rollout.free_cache_engine:
+                ray.get([server.sleep.remote() for server in self.async_llm_servers])
 
     def submit_chat_completions(
         self,
@@ -213,8 +239,10 @@ class AsyncLLMServerManager:
         with self.timing_record("async_server/generate_sequences"):
             assert self.chat_scheduler is not None, "chat scheduler is not initialized."
 
-            future = asyncio.run_coroutine_threadsafe(self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop)
-            return future.result()
+        future = asyncio.run_coroutine_threadsafe(
+            self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop
+        )
+        return future.result()
 
     @contextmanager
     def timing_record(self, method_name : str, **kwargs):
@@ -243,22 +271,38 @@ class AsyncLLMServerManager:
         self.timing_data.clear()
         return [res]
 
-def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
+def async_server_class(
+    rollout_backend: str, rollout_backend_module: Optional[str] = None, rollout_backend_class: Optional[str] = None
+) -> Type[AsyncServerBase]:
     """Get async server class.
 
     Args:
-        rollout_backend: str, rollout backend, should be "vllm" or "sglang".
+        rollout_backend: str, rollout backend type (alias), should be "vllm" or "sglang".
+        rollout_backend_module: Optional[str], import path of the rollout backend.
+        rollout_backend_class: Optional[str], class name of the rollout backend.
 
     Returns:
         Type[AsyncServerBase]: async server class.
     """
-    if rollout_backend == "vllm":
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer
+    if rollout_backend_class is None and rollout_backend_module is None:
+        # If both are None, use the default backend class
+        # Do not change the original import behavior
+        # importlib.import_module and from ... import ... have subtle differences in ray
 
-        return AsyncvLLMServer
-    elif rollout_backend == "sglang":
-        from verl.workers.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
+        if rollout_backend == "vllm":
+            from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer
 
-        return AsyncSglangServer
-    else:
-        raise NotImplementedError
+            return AsyncvLLMServer
+        elif rollout_backend == "sglang":
+            from verl.workers.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
+
+            return AsyncSglangServer
+        else:
+            raise NotImplementedError(f"rollout backend {rollout_backend} is not supported")
+
+    if rollout_backend_module is None or rollout_backend_class is None:
+        raise ValueError("rollout_backend_module and rollout_backend_class must be both provided for customization")
+
+    from verl.utils.import_utils import load_extern_type
+
+    return load_extern_type(rollout_backend_module, rollout_backend_class)

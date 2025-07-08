@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+from typing import Any, Dict, List
 
 import ray
 from omegaconf import DictConfig
@@ -45,7 +46,6 @@ class AsyncSglangServer(AsyncServerBase):
             return
         all_actors = ray.util.list_named_actors(all_namespaces=True)
         matched_actors = [actor for actor in all_actors if actor.get("name", None).startswith(self.wg_prefix + "WorkerDict_")]
-        matched_names = [matched_actor['name'] for matched_actor in matched_actors]
 
         for matched_actor in matched_actors:
             fields = matched_actor["name"].split(":")
@@ -67,14 +67,21 @@ class AsyncSglangServer(AsyncServerBase):
         [outputs] = await asyncio.gather(output_future)
         return JSONResponse(outputs)
 
-    def wake_up(self):
-        futures = []
-        for worker in self.workers:
-            futures.append(worker.wake_up.remote())
-        ray.get(futures)
+    async def generate(self, prompt_ids: List[int], sampling_params: Dict[str, Any], request_id: str) -> List[int]:
+        return await self.master_worker.generate.remote(prompt_ids, sampling_params, request_id)
 
-    def sleep(self):
-        futures = []
-        for worker in self.workers:
-            futures.append(worker.sleep.remote())
-        ray.get(futures)
+    async def wake_up(self):
+        if not self.config.rollout.free_cache_engine:
+            return
+
+        tasks = [worker.wake_up.remote() for worker in self.workers]
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def sleep(self):
+        if not self.config.rollout.free_cache_engine:
+            return
+
+        tasks = [worker.sleep.remote() for worker in self.workers]
+        if tasks:
+            await asyncio.gather(*tasks)

@@ -9,8 +9,6 @@ DIST_CKPT_PATH=/nlp_group/huangjiaming/Qwen3-30B-A3B-mcore
 #/opt/conda/envs/py310/bin/python  converter_hf_to_mcore.py --hf_model_path $HF_MODEL_PATH --output_path $DIST_CKPT_PATH
 #exit 0
 
-# If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
-# export VLLM_ATTENTION_BACKEND=XFORMERS
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 export HYDRA_FULL_ERROR=1
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
