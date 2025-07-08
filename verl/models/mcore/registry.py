@@ -17,7 +17,7 @@ Registry module for model architecture components.
 """
 
 from enum import Enum
-from typing import Callable, Dict, Type
+from typing import Callable, Dict, Type, Optional
 
 import torch
 import torch.nn as nn
@@ -146,6 +146,7 @@ def init_mcore_model(
     *,
     share_embeddings_and_output_weights: bool = False,
     value: bool = False,
+    vp_stage: Optional[int] = None,
     **extra_kwargs,  # may be used for vlm and moe
 ) -> nn.Module:
     """
@@ -167,7 +168,7 @@ def init_mcore_model(
     model = get_supported_model(hf_config.architectures[0])
     initializer_cls = MODEL_INITIALIZER_REGISTRY[model]
     initializer = initializer_cls(tfconfig, hf_config)
-    return initializer.initialize(pre_process=pre_process, post_process=post_process, share_embeddings_and_output_weights=share_embeddings_and_output_weights, value=value, **extra_kwargs)
+    return initializer.initialize(pre_process=pre_process, post_process=post_process, share_embeddings_and_output_weights=share_embeddings_and_output_weights, value=value, vp_stage=vp_stage, **extra_kwargs)
 
 
 def get_mcore_forward_fn(hf_config: PretrainedConfig) -> Callable:

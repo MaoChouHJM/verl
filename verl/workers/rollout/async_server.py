@@ -19,6 +19,8 @@ import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Tuple, Type
+import time
+from contextlib import contextmanager
 
 import fastapi
 import ray
@@ -46,6 +48,7 @@ class AsyncServerBase(ABC):
         self.address = ray._private.services.get_node_ip_address()
         self.port = None
         self.server_ready = asyncio.Event()
+        self.timing_data = {}
         asyncio.create_task(self._start_fastapi_server())
 
     async def _start_fastapi_server(self):
@@ -136,7 +139,7 @@ class AsyncLLMServerManager:
                         soft=False,
                     ),
                     name=f"async_llm_server_{rollout_dp_rank}",
-                ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
+                ).remote(self.full_config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
                 for rollout_dp_rank in unready_dp_ranks
             }
 
@@ -160,6 +163,7 @@ class AsyncLLMServerManager:
         self.chat_scheduler_thread = threading.Thread(target=self._init_chat_scheduler, daemon=True)
         self.chat_scheduler_thread.start()
         self.chat_scheduler_ready.wait()
+        self.timing_data = {}
 
     def _init_chat_scheduler(self):
         self.chat_scheduler_loop = asyncio.new_event_loop()
@@ -175,11 +179,13 @@ class AsyncLLMServerManager:
 
     def wake_up(self):
         """Wake up all vllm instances."""
-        ray.get([server.wake_up.remote() for server in self.async_llm_servers])
+        with self.timing_record("async_server/wake_up"):
+            ray.get([server.wake_up.remote() for server in self.async_llm_servers])
 
     def sleep(self):
         """Sleep all vllm instances."""
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
+        with self.timing_record("async_server/sleep"):
+            ray.get([server.sleep.remote() for server in self.async_llm_servers])
 
     def submit_chat_completions(
         self,
@@ -204,11 +210,38 @@ class AsyncLLMServerManager:
 
     def generate_sequences(self, prompts: DataProto, **sampling_params) -> DataProto:
         """Generate multiple sequences in parallel via chat scheduler."""
-        assert self.chat_scheduler is not None, "chat scheduler is not initialized."
+        with self.timing_record("async_server/generate_sequences"):
+            assert self.chat_scheduler is not None, "chat scheduler is not initialized."
 
-        future = asyncio.run_coroutine_threadsafe(self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop)
-        return future.result()
+            future = asyncio.run_coroutine_threadsafe(self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop)
+            return future.result()
 
+    @contextmanager
+    def timing_record(self, method_name : str, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            assert method_name not in self.timing_data, method_name
+            self.timing_data[method_name] = duration
+            #wandb.log({method_name : duration})
+            for k,v in kwargs:
+                name = method_name + '/' + k
+                assert name not in self.timing_data
+                self.timing_data[name] = v
+                #wandb.log({name : v})
+
+    def get_timing_report(self):
+        if self.timing_data == {}:
+            return
+        host_port = "localhost" + ":" + "100"
+        res = {}
+        from copy import deepcopy
+        res[host_port] = deepcopy(self.timing_data)
+        self.timing_data.clear()
+        return [res]
 
 def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
     """Get async server class.

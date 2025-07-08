@@ -254,7 +254,46 @@ class McoreToHFWeightConverterQwen2_5_VL(McoreToHFWeightConverterDense):
         return convert_names, params
 
 
+def fp8_quant_method(name: str, x: torch.Tensor) -> tuple[list[str], list[torch.Tensor]]:
+    # https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_core.py#L26C1-L34C114
+    from deep_gemm import ceil_div
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros((ceil_div(m, 128) * 128, ceil_div(n, 128) * 128), dtype=x.dtype, device=x.device)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
+    names = [name, name + "_scale_inv"]
+    weight = x_scaled.view_as(x_padded)[:m, :n].contiguous()
+    scale = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+    return names, [weight, scale]
+
+def no_quant_method(name: str, x: torch.Tensor) -> tuple[list[str], list[torch.Tensor]]:
+    return [name], [x]
+
 class McoreToHFWeightConverterDpskv3(McoreToHFWeightConverterBase):
+    def _quantize_param(self, names: list[str], params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
+        assert len(names) == len(params)
+        output_names= []
+        output_params= []
+        quant_method = self.hf_config.quantization_config.get('quant_method', 'no_quant')
+        quant_method_dict = {'fp8': fp8_quant_method,
+                             'no_quant': no_quant_method}
+        import re
+        pattern = re.compile(r"e_score_correction_bias|layernorm|mlp\.gate\.weight|norm\.weight|lm_head\.weight|embed_tokens\.weight")
+        for name, param in zip(names, params):
+            if pattern.search(name) is None:
+                quantized_names, quantized_params = quant_method_dict[quant_method](name, param)
+                output_names += quantized_names
+                output_params += quantized_params
+            else:
+                output_names.append(name)
+                output_params.append(param)
+        
+        return output_names, output_params
+
+                
     def _convert_attention_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
         # mcore
         # 'decoder.layers.0.input_layernorm.weight'
@@ -292,6 +331,8 @@ class McoreToHFWeightConverterDpskv3(McoreToHFWeightConverterBase):
         layer_number = name.split(".")[2]
         name_after_layer = name.split(f".{layer_number}.")[1]
         convert_names.append(f"model.layers.{layer_number}.{name_map_after_layer[name_after_layer]}")
+
+        convert_names, params = self._quantize_param(convert_names, params)
         return convert_names, params
 
     def _convert_mlp_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
@@ -362,6 +403,7 @@ class McoreToHFWeightConverterDpskv3(McoreToHFWeightConverterBase):
             else:
                 raise NotImplementedError(f"Unsupported parameter name: {name}")
 
+        convert_names, params = self._quantize_param(convert_names, params)
         return convert_names, params
 
     def _convert_mtp_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
@@ -379,6 +421,8 @@ class McoreToHFWeightConverterDpskv3(McoreToHFWeightConverterBase):
             convert_names, params = self._convert_mlp_param(proxy_name, params)
         else:
             raise NotImplementedError(f"Unsupported parameter name: {name}")
+
+        convert_names, params = self._quantize_param(convert_names, params)
         return convert_names, params
 
     def convert_param(self, name: str, params_one_group: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:

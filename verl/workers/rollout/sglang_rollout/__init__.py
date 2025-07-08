@@ -11,6 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 
-from .sglang_rollout import SGLangRollout
+try:
+    from .sglang_rollout import SGLangRollout
+except Exception as e:
+    print(f'{e} , handle vllm stuff in sglang, skipped')
+
 
 __all__ = ["SGLangRollout"]

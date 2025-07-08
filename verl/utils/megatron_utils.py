@@ -57,14 +57,16 @@ def get_model(
         for i in range(mpu.get_virtual_pipeline_model_parallel_world_size()):
             mpu.set_virtual_pipeline_model_parallel_rank(i)
             # Set pre_process and post_process only after virtual rank is set.
-            pre_process = mpu.is_pipeline_first_stage()
-            post_process = mpu.is_pipeline_last_stage()
-            this_model = model_provider_func(pre_process=pre_process, post_process=post_process)
+            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False)
+            post_process = mpu.is_pipeline_last_stage(ignore_virtual=False)
+            this_model = model_provider_func(pre_process=pre_process, post_process=post_process, vp_stage=i)
+            #this_model = model_provider_func(pre_process=pre_process, post_process=post_process)
             this_model.model_type = model_type
+            this_model.vp_stage = i
             model.append(this_model)
     else:
-        pre_process = mpu.is_pipeline_first_stage()
-        post_process = mpu.is_pipeline_last_stage()
+        pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False)
+        post_process = mpu.is_pipeline_last_stage(ignore_virtual=False)
         add_encoder = True
         add_decoder = True
         if model_type == ModelType.encoder_and_decoder:

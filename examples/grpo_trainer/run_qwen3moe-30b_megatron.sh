@@ -13,8 +13,9 @@ DIST_CKPT_PATH=/nlp_group/huangjiaming/Qwen3-30B-A3B-mcore
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 export HYDRA_FULL_ERROR=1
+timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
-rollout_mode="sync"
+rollout_mode="async"
 rollout_name="sglang" # sglang or vllm
 if [ "$rollout_mode" = "async" ]; then
     export VLLM_USE_V1=1
@@ -56,7 +57,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.temperature=0.0 \
-    actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=4 \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=1 \
@@ -66,7 +67,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo --config-path=config \
     ++reward_model.enable_reward_workers=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.logger=['console'] \
     trainer.project_name='verl_grpo_example_gsm8k_math' \
     trainer.experiment_name='qwen3_30b_moe_megatron' \
@@ -74,4 +75,4 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.nnodes=4 \
     trainer.save_freq=20 \
     trainer.test_freq=5 \
-    trainer.total_epochs=15 2>&1 | tee qwen3_moe.log
+    trainer.total_epochs=15 2>&1 | tee qwen3_moe_$timestamp.log

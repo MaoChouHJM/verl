@@ -16,6 +16,7 @@
 
 # use mcore transformer config to initialize the model
 from abc import ABC, abstractmethod
+from typing import List, Optional, Tuple, Union
 
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec, get_gpt_mtp_block_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
@@ -51,6 +52,7 @@ class BaseModelInitializer(ABC):
         post_process: bool = True,
         share_embeddings_and_output_weights: bool = False,
         value: bool = False,
+        vp_stage: Optional[int] =None,
         **extra_kwargs,
     ) -> GPTModel:
         """Initialize a GPT model with the given configuration.
@@ -80,6 +82,7 @@ class BaseModelInitializer(ABC):
             rotary_base=self.hf_config.rope_theta,
             **rope_scaling_args,
             mtp_block_spec=mtp_block_spec,
+            vp_stage=vp_stage,
         )
 
         if post_process and value:

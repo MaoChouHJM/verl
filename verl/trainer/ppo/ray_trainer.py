@@ -776,27 +776,21 @@ class RayPPOTrainer:
         if self.use_critic:
             self.critic_wg = all_wg["critic"]
             self.critic_wg.init_model()
-            self._report_timing_stat()
 
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
-            self._report_timing_stat()
 
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
-            self._report_timing_stat()
         if self.use_rm_worker:
             self.rm_worker_wg = all_wg['rm_worker']
-            self._report_timing_stat()
     
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self._report_timing_stat()
 
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
-        self._report_timing_stat()
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -808,6 +802,8 @@ class RayPPOTrainer:
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
             )
+
+        self._report_timing_stat()
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -908,7 +904,7 @@ class RayPPOTrainer:
 
     def _report_timing_stat(self):
         def report_stat(timing_data):
-            if timing_data[0] is None:
+            if timing_data is None or timing_data[0] is None:
                 return
             stats_report = {}
             node_names = [list(node_data.keys())[0] for node_data in timing_data]
@@ -955,6 +951,9 @@ class RayPPOTrainer:
         if hasattr(self, "actor_rollout_wg") and self.actor_rollout_wg is not None:
             report_stat(self.actor_rollout_wg.get_timing_report())
 
+        if self.async_rollout_mode == True:
+            report_stat(self.async_rollout_manager.get_timing_report())
+
     def fit(self):
         """
         The training loop of PPO.
@@ -974,6 +973,7 @@ class RayPPOTrainer:
         )
 
         self.global_steps = 0
+
 
         # load checkpoint before doing anything
         self._load_checkpoint()

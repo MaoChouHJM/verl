@@ -44,7 +44,7 @@ def run_ppo(config) -> None:
         ray.init(
             runtime_env={
                 "env_vars": {"TOKENIZERS_PARALLELISM": "true",
-                             "NCCL_DEBUG": "INFO",
+                             "NCCL_DEBUG": "WARN",
                              #"NCCL_IB_DISABLE": "0",
                              #"NCCL_IB_GID_INDEX": "3",
                              #"NCCL_SOCKET_IFNAME": "eth",

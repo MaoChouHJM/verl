@@ -320,7 +320,7 @@ class ChatCompletionScheduler:
         completions, exception = None, None
         try:
             # NOTE: OpenAI client uses httpx, seems to have performance issue in high concurrency requests.
-            completions = await self._chat_completions_aiohttp(
+            completions = await self._chat_completions_openai(
                 address,
                 messages=messages,
                 tools=self.completion_callback.tool_schemas,

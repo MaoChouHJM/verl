@@ -1,0 +1,238 @@
+diff --git a/python/sglang/srt/entrypoints/engine.py b/python/sglang/srt/entrypoints/engine.py
+index 0c9988df..2122facd 100644
+--- a/python/sglang/srt/entrypoints/engine.py
++++ b/python/sglang/srt/entrypoints/engine.py
+@@ -133,7 +133,7 @@ class Engine(EngineBase):
+ 
+         context = zmq.Context(2)
+         self.send_to_rpc = get_zmq_socket(
+-            context, zmq.DEALER, port_args.rpc_ipc_name, True
++            context, zmq.DEALER, port_args.rpc_ipc_name, False
+         )
+ 
+     def generate(
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index e43d1f0b..28993b2e 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -314,19 +314,19 @@ class Fp8LinearMethod(LinearMethodBase):
+             # If ROCm, normalize the weights and scales to e4m3fnuz
+             if _is_fp8_fnuz:
+                 # activation_scheme: dynamic
+-                weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
++                layer.weight.data, layer.weight_scale_inv.data, _ = normalize_e4m3fn_to_e4m3fnuz(
+                     weight=layer.weight,
+                     weight_scale=layer.weight_scale_inv,
+                     input_scale=None,
+                 )
+ 
+                 layer.input_scale = None
+-            else:
+-                weight, weight_scale = layer.weight.data, layer.weight_scale_inv.data
+-            layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+-            layer.weight_scale_inv = torch.nn.Parameter(
+-                weight_scale, requires_grad=False
+-            )
++            #else:
++            #    weight, weight_scale = layer.weight.data, layer.weight_scale_inv.data
++            #layer.weight = torch.nn.Parameter(weight, requires_grad=False)
++            #layer.weight_scale_inv = torch.nn.Parameter(
++            #    weight_scale, requires_grad=False
++            #)
+             return
+ 
+         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
+diff --git a/python/sglang/srt/managers/io_struct.py b/python/sglang/srt/managers/io_struct.py
+index 1dd9c519..bb22f221 100644
+--- a/python/sglang/srt/managers/io_struct.py
++++ b/python/sglang/srt/managers/io_struct.py
+@@ -742,6 +742,8 @@ class UpdateWeightsFromTensorReqInput:
+     load_format: Optional[str] = None
+     # Whether to flush the cache after updating weights
+     flush_cache: bool = True
++    # timer
++    timer: Optional[dict] = None
+ 
+ 
+ @dataclass
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 3c449fbe..00f43304 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -833,6 +833,13 @@ class Scheduler(
+             else:
+                 recv_reqs = None
+ 
++        # add timer for commn cost
++        import time
++        if recv_reqs is not None: 
++            for recv_req in recv_reqs:
++                if hasattr(recv_req, 'timer'):
++                    recv_req.timer['tokenizer_to_scheduler_time'] = time.time() - recv_req.timer['tokenizer_to_scheduler_time']
++                    recv_req.timer['scheduler_broadcast_time'] = time.time()
+         if self.server_args.enable_dp_attention:
+             if self.attn_tp_rank == 0:
+                 work_reqs = [
+@@ -875,6 +882,11 @@ class Scheduler(
+                 self.tp_cpu_group,
+                 src=self.tp_group.ranks[0],
+             )
++        if recv_reqs is not None: 
++            for recv_req in recv_reqs:
++                if hasattr(recv_req, 'timer'):
++                    recv_req.timer['scheduler_broadcast_time'] = time.time() - recv_req.timer['scheduler_broadcast_time']
++
+         return recv_reqs
+ 
+     def process_input_requests(self, recv_reqs: List):
+diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
+index 8af7bf0f..41bcad41 100644
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -912,6 +912,8 @@ class TokenizerManager:
+             self.server_args.dp_size == 1 or self.server_args.enable_dp_attention
+         ), "dp_size must be 1 or dp attention must be enabled for update weights from tensor"
+ 
++        import time
++        obj.timer.update({'tokenizer_to_scheduler_time': time.time()})
+         # This means that weight sync
+         # cannot run while requests are in progress.
+         async with self.model_update_lock.writer_lock:
+diff --git a/python/sglang/srt/managers/tp_worker.py b/python/sglang/srt/managers/tp_worker.py
+index 786a34a1..b30d5db7 100644
+--- a/python/sglang/srt/managers/tp_worker.py
++++ b/python/sglang/srt/managers/tp_worker.py
+@@ -252,12 +252,27 @@ class TpModelWorker:
+         return success, message
+ 
+     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
+-        success, message = self.model_runner.update_weights_from_tensor(
+-            named_tensors=MultiprocessingSerializer.deserialize(
++        import time
++        desrial_time = time.time()
++        if self.tp_rank == 0:
++            named_tensors = MultiprocessingSerializer.deserialize(
+                 recv_req.serialized_named_tensors[self.tp_rank]
+-            ),
++            )
++        else:
++            named_tensors = []
++
++        desrial_time = time.time() - desrial_time
++            
++        success, message = self.model_runner.update_weights_from_tensor(
++            named_tensors=named_tensors,
+             load_format=recv_req.load_format,
+         )
++        timer = recv_req.timer
++        comm_timer_str = ""
++        for name, time in timer.items():
++            comm_timer_str += f"{name}={time} "
++        message = f'{comm_timer_str} {desrial_time=} ' + message
++
+         return success, message
+ 
+     def get_weights_by_name(self, recv_req: GetWeightsByNameReqInput):
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index 21a7ccac..f5b8667f 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -733,23 +733,75 @@ class ModelRunner:
+             )
+             logger.error(error_msg)
+             return False, error_msg
+-
+     def update_weights_from_tensor(
+         self,
+         named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
+         load_format: Optional[str] = None,
+     ):
++        import time
++        from sglang.srt.utils import broadcast_pyobj
++        broadcast_meta_time = time.time()
++        if self.tp_rank == 0:
++            name_list = [name for name, _ in named_tensors]
++            t_shape_list = [list(tensor.shape) for _, tensor in named_tensors]
++            t_dtype_list = [tensor.dtype for _, tensor in named_tensors]
++        else:
++            name_list = [None]
++            t_shape_list = [None]
++            t_dtype_list = [None]
++        name_list = broadcast_pyobj(
++            data=name_list,
++            rank=self.tp_rank,
++            dist_group=self.tp_group.cpu_group,
++            src=self.tp_group.ranks[0],
++        )
++        t_shape_list = broadcast_pyobj(
++            data=t_shape_list,
++            rank=self.tp_rank,
++            dist_group=self.tp_group.cpu_group,
++            src=self.tp_group.ranks[0],
++        )
++        t_dtype_list = broadcast_pyobj(
++            data=t_dtype_list,
++            rank=self.tp_rank,
++            dist_group=self.tp_group.cpu_group,
++            src=self.tp_group.ranks[0],
++        )
++
++
++        broadcast_meta_time = time.time() - broadcast_meta_time
++        broadcast_tensor_time = time.time()
++        tensor_list = []
++        for idx, (t_shape, t_dtype) in enumerate(zip(t_shape_list, t_dtype_list)):
++            if self.tp_rank == 0:
++                tensor = named_tensors[idx][1]
++            else:
++                tensor = torch.empty(torch.Size(t_shape), dtype=t_dtype, device=self.device)
++            torch.distributed.broadcast(tensor, src=0, group=self.tp_group.device_group)
++            tensor_list.append(tensor)
++    
++        assert len(name_list) == len(tensor_list)
++
++        broadcast_tensor_time = time.time() - broadcast_tensor_time
++        load_model_time = time.time()
++
+         named_tensors = [
+-            (name, _unwrap_tensor(tensor, tp_rank=self.tp_rank))
+-            for name, tensor in named_tensors
++            (name, tensor)
++            for name, tensor in list(zip(name_list, tensor_list))
+         ]
+-        if load_format == "direct":
+-            _model_load_weights_direct(self.model, named_tensors)
+-        elif load_format is None:
+-            self.model.load_weights(named_tensors)
+-        else:
+-            raise NotImplementedError(f"Unknown load_format={load_format}")
+-        return True, "Success"
++
++        with set_default_torch_dtype(self.model_config.dtype):
++            if load_format == "direct":
++                _model_load_weights_direct(self.model, named_tensors)
++            elif load_format is None:
++                self.model.load_weights(named_tensors)
++            else:
++                raise NotImplementedError(f"Unknown load_format={load_format}")
++
++        load_model_time = time.time() - load_model_time
++    
++        return True, f"{load_model_time=} {broadcast_tensor_time=} {broadcast_meta_time=}"
++
+ 
+     def get_weights_by_name(
+         self, name: str, truncate_size: int = 100
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index ab28e5ab..1978f4c3 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -1537,7 +1537,7 @@ class PortArgs:
+             ), "please provide --dist-init-addr as host:port of head node"
+ 
+             dist_init_host, dist_init_port = dist_init_addr
+-            port_base = int(dist_init_port) + 1
++            port_base = int(dist_init_port) + 1 + 32768
+             if dp_rank is None:
+                 scheduler_input_port = (
+                     port_base + 3

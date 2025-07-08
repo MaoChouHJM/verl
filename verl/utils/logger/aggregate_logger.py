@@ -18,6 +18,7 @@ A Ray logger will receive logging info from different processes.
 import logging
 import numbers
 from typing import Dict
+import torch
 
 
 def concat_dict_to_str(dict: Dict, step):
@@ -28,6 +29,13 @@ def concat_dict_to_str(dict: Dict, step):
     output_str = " - ".join(output)
     return output_str
 
+def print_rank_0(message):
+    """If distributed is initialized, print only on rank 0."""
+    if torch.distributed.is_initialized():
+        if torch.distributed.get_rank() == 0:
+            print(message, flush=True)
+    else:
+        print(message, flush=True)
 
 class LocalLogger:
     def __init__(self, remote_logger=None, enable_wandb=False, print_to_console=False):

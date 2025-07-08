@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from verl.protocol import DataProto, all_gather_data_proto
 from verl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
 from verl.utils.debug.performance import _timer
-from verl.utils.megatron_utils import per_tensor_generator
+from verl.utils.megatron_utils import per_tensor_generator, load_megatron_model_to_gpu, offload_megatron_model_to_cpu
 
 from .base import BaseShardingManager
 
@@ -58,6 +58,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         transformer_config,
         layer_name_mapping,
         weight_converter,
+        offload_param,
         device_mesh: DeviceMesh | None = None,
     ):
         self.actor_module = actor_module
@@ -66,6 +67,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         self.transformer_config = transformer_config
         self.layer_name_mapping = layer_name_mapping
         self.weight_converter = weight_converter
+        self.offload_param = offload_param
         self.device_mesh = device_mesh
 
         if self.device_mesh is not None:
@@ -126,35 +128,62 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                 torch.cuda.set_rng_state(self.torch_random_states)
 
     async def update_weights(self, params):
-        if self.device_mesh["tp"].get_local_rank() == 0:
-            await self.inference_engine.resume_memory_occupation()
+        timing = {}
+        with _timer("resume_memory_occupation", timing):
+            if self.device_mesh["tp"].get_local_rank() == 0:
+                await self.inference_engine.resume_memory_occupation()
 
         # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
         # named_tensors = [(k, v) for k, v in params.items()]
         named_tensors = params
         load_format = None
-        for tensor_index, (name, tensor) in enumerate(named_tensors):
-            if self.device_mesh["tp"].get_local_rank() == 0:
-                await self.inference_engine.update_weights_from_tensor(
-                    named_tensors=[
-                        (
-                            name,
-                            tensor.detach(),
+        with _timer("weight_update_total", timing):
+            start_time = time.time()
+            for tensor_index, (name, tensor) in enumerate(named_tensors):
+                cur_time = time.time()
+                timing[f'generate_weight_{name}'] = cur_time - start_time
+                timing[f'weight_shape_{name}'] = tensor.shape
+                timing[f'weight_dtype_{name}'] = tensor.dtype
+                with _timer(f"update_tensor_{name}", timing):
+                    if self.device_mesh["tp"].get_local_rank() == 0:
+                        success, sglang_time = await self.inference_engine.update_weights_from_tensor(
+                            named_tensors=[
+                                (
+                                    name,
+                                    tensor.detach(),
+                                )
+                            ],
+                            load_format=load_format,
+                            flush_cache=False,
                         )
-                    ],
-                    load_format=load_format,
-                    flush_cache=False,
-                )
+                        timing[f'sglang_cost_time_{name}'] = sglang_time
+                with _timer(f"flush_cache_{name}", timing):
+                    if self.device_mesh["tp"].get_local_rank() == 0:
+                        await self.inference_engine.flush_cache()
+                start_time = time.time()
 
-            if self.device_mesh["tp"].get_local_rank() == 0:
-                await self.inference_engine.flush_cache()
+        if not hasattr(self, '_first_call_update_weights') or not self._first_call_update_weights:
+            self._first_call_update_weights = True
 
+            if self.device_mesh.get_rank() == 0:
+                import pickle
+                from datetime import datetime
+                now = datetime.now()
+                formatted_date_time = now.strftime("%Y-%m-%d_%H_%M_%S")
+                dump_file = os.getcwd() + f"/cost_{formatted_date_time}.pkl"
+                with open(dump_file, 'wb') as f:
+                    pickle.dump(timing, f) 
+                    print(f'update_weights_from_tensor perf file: {dump_file} has dumped')
+
+            
     async def release_memory(self):
         if self.device_mesh["tp"].get_local_rank() == 0:
             await self.inference_engine.release_memory_occupation()
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     async def wake_up(self):
+        if self.offload_param:
+            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
         per_tensor_param = per_tensor_generator(
             self.actor_module,
             self.model_config,
@@ -163,6 +192,8 @@ class MegatronSGLangShardingManager(BaseShardingManager):
             self.layer_name_mapping,
         )
         await self.update_weights(per_tensor_param)
+        if self.offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
         # important: need to manually set the random states of each tp to be identical.
         if self.device_mesh is not None:
             self.torch_random_states = torch.cuda.get_rng_state()

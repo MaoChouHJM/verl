@@ -163,10 +163,15 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
     ):
         """Update weights from distributed source. If there are going to be more updates, set `flush_cache` to be false
         to avoid duplicated cache cleaning operation."""
+ 
+        serial_start_time = time.time()
+        serialized_named_tensors=[MultiprocessingSerializer.serialize(named_tensors)]
+        serial_time = time.time() - serial_start_time
         obj = UpdateWeightsFromTensorReqInput(
-            serialized_named_tensors=[MultiprocessingSerializer.serialize(named_tensors) for _ in range(self.server_args.tp_size)],
+            serialized_named_tensors=serialized_named_tensors,
             load_format=load_format,
             flush_cache=flush_cache,
+            timer={'serial_time': serial_time}
         )
         return await self.tokenizer_manager.update_weights_from_tensor(obj, None)
 
@@ -331,6 +336,7 @@ class SGLangRollout(BaseRollout):
             self.config.multi_turn.max_turns = self.config.max_model_len // 3
 
     def _init_inference_engine(self, trust_remote_code, actor_module, port):
+        from omegaconf import OmegaConf
         # initialize the inference engine
         nnodes = -(-self._tp_size // len(self.visible_devices_set))
         if nnodes > 1:
@@ -351,6 +357,7 @@ class SGLangRollout(BaseRollout):
         tp_size_per_node = self._tp_size // nnodes
         node_rank = self._tp_rank // tp_size_per_node
         first_rank_in_node = self._tp_rank % tp_size_per_node == 0
+        override_rollout_config = OmegaConf.to_container(self.config.get("override_config", OmegaConf.create()))
 
         if first_rank_in_node:
             rank = dist.get_rank()
@@ -371,6 +378,7 @@ class SGLangRollout(BaseRollout):
                 # NOTE(linjunrong): add rank to prevent SGLang generate same port inside PortArgs.init_new
                 # when random.seed is being set during training
                 port=30000 + rank,
+                **override_rollout_config,
                 # NOTE(Chenyang): if you want to debug the SGLang engine output
                 # please set the following parameters
                 # Otherwise, it will make the engine run too slow
@@ -639,7 +647,6 @@ class SGLangRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
-            # print(f"{self.sampling_params=}")
             if self._tp_rank == 0:
                 loop = asyncio.get_event_loop()
                 output = loop.run_until_complete(
@@ -1097,8 +1104,12 @@ class SGLangRollout(BaseRollout):
             prompt_loss_mask=[0] * len(_input_ids),
             response_loss_mask=[],
             reward_scores={},
+            max_prompt_len=self.config.prompt_length,
             max_response_len=self.config.response_length,
             max_model_len=min(self.config.max_model_len, self.config.prompt_length + self.config.response_length),
+            use_inference_chat_template=self.config.multi_turn.use_inference_chat_template,
+            enable_tokenization_sanity_check=self.config.multi_turn.enable_tokenization_sanity_check,
+            tokenizer=self.tokenizer,
         )
 
         # json_request already contains sampling_params
