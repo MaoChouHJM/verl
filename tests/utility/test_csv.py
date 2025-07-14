@@ -19,26 +19,56 @@ def process_and_save_to_csv(data_dict, output_filename=output_csv_file):
     
     # 遍历字典，提取name和对应的值
     for key, value in data_dict.items():
-        if key.startswith("generate_weight_"):
-            name = key.replace("generate_weight_", "")
-            if name not in processed_data:
-                processed_data[name] = {}
-            processed_data[name]["generate_weight"] = value
-        elif key.startswith("weight_shape_"):
+        if key.startswith("weight_shape_"):
             name = key.replace("weight_shape_", "")
             if name not in processed_data:
                 processed_data[name] = {}
             processed_data[name]["weight_shape"] = value
+        elif key.startswith("max_mem_allocated_gb_"):
+            name = key.replace("max_mem_allocated_gb_", "")
+            if name not in processed_data:
+                processed_data[name] = {}
+            processed_data[name]["max_mem_allocated_gb"] = value
+        elif key.startswith("max_mem_reserved_gb_"):
+            name = key.replace("max_mem_reserved_gb_", "")
+            if name not in processed_data:
+                processed_data[name] = {}
+            processed_data[name]["max_mem_reserved_gb"] = value
         elif key.startswith("weight_dtype"):
             name = key.replace("weight_dtype_", "")
             if name not in processed_data:
                 processed_data[name] = {}
             processed_data[name]["weight_dtype"] = value
+        elif key.startswith("generate_weight_"):
+            name = key.replace("generate_weight_", "")
+            if name not in processed_data:
+                processed_data[name] = {}
+            processed_data[name]["generate_weight"] = value
+        elif key.startswith("generate_weight_"):
+            name = key.replace("generate_weight_", "")
+            if name not in processed_data:
+                processed_data[name] = {}
+            processed_data[name]["generate_weight"] = value
+        elif key.startswith("D2H_time_"):
+            name = key.replace("D2H_time_", "")
+            if name not in processed_data:
+                processed_data[name] = {}
+            processed_data[name]["D2H_time"] = value
         elif key.startswith("update_tensor_"):
             name = key.replace("update_tensor_", "")
             if name not in processed_data:
                 processed_data[name] = {}
             processed_data[name]["update_tensor"] = value
+        elif key.startswith("flush_cache_"):
+            name = key.replace("flush_cache_", "")
+            if name not in processed_data:
+                processed_data[name] = {}
+            processed_data[name]["flush_cache"] = value
+        elif key.startswith("empty_mcore_cahce_"):
+            name = key.replace("empty_mcore_cahce_", "")
+            if name not in processed_data:
+                processed_data[name] = {}
+            processed_data[name]["empty_mcore_cahce"] = value
         elif key.startswith("sglang_cost_time_"):
             name = key.replace("sglang_cost_time_", "")
             if name not in processed_data:
@@ -62,11 +92,6 @@ def process_and_save_to_csv(data_dict, output_filename=output_csv_file):
                 # 如果 sglang_cost_time 不是字符串，可以根据需要处理，例如设置为None或NaN
                 pass # 或者 raise ValueError("sglang_cost_time value is not a string")
 
-        elif key.startswith("flush_cache_"):
-            name = key.replace("flush_cache_", "")
-            if name not in processed_data:
-                processed_data[name] = {}
-            processed_data[name]["flush_cache"] = value
 
     # 将处理后的数据转换为DataFrame
     df = pd.DataFrame.from_dict(processed_data, orient='index')

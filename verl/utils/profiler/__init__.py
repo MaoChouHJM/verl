@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from ..import_utils import is_nvtx_available
-from .performance import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
+from .performance import GPUMemoryLogger, log_gpu_memory_usage, simple_timer, get_most_used_gpu_memory, calculate_string_md5
 from .profile import DistProfilerExtension, ProfilerConfig
 
 if is_nvtx_available():
@@ -34,4 +34,6 @@ __all__ = [
     "ProfilerConfig",
     "simple_timer",
     "marked_timer",
+    "get_most_used_gpu_memory",
+    "calculate_string_md5",
 ]

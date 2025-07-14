@@ -15,6 +15,10 @@
 import datetime
 import inspect
 import logging
+import subprocess
+import hashlib
+import xml.etree.ElementTree as ET
+
 from contextlib import contextmanager
 from typing import Any, Dict, Optional, Tuple
 
@@ -203,3 +207,97 @@ def reduce_timing(timing_raw: Dict[str, float]) -> Dict[str, float]:
     timing_list = [tensor.item() for tensor in timing_list.to("cpu")]
     timing_generate = {key_list[i]: timing_list[i] for i in range(len(key_list))}
     return timing_generate
+
+
+def get_most_used_gpu_memory():
+    """
+    通过执行 nvidia-smi -q -x 命令获取单机多卡环境中显存使用最多的GPU卡信息。
+    只输出总显存、空余显存和已用显存。
+    """
+    try:
+        # 执行 nvidia-smi -q -x 命令，获取完整的XML格式输出
+        command = "nvidia-smi -q -x"
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
+        xml_output = result.stdout
+
+        # 使用 ElementTree 解析 XML
+        root = ET.fromstring(xml_output)
+
+        max_used_memory_mb = -1
+        most_used_gpu_info = None
+
+        # 遍历所有 <gpu> 元素，并使用 enumerate 获取其在列表中的索引
+        for i, gpu_elem in enumerate(root.findall('gpu')):
+            gpu_id = i # 使用循环变量 i 作为 GPU 的逻辑索引
+
+            # 获取显存信息
+            fb_memory_usage = gpu_elem.find('fb_memory_usage')
+            if fb_memory_usage is not None:
+                total_memory_text = fb_memory_usage.find('total').text if fb_memory_usage.find('total') is not None else '0 MiB'
+                used_memory_text = fb_memory_usage.find('used').text if fb_memory_usage.find('used') is not None else '0 MiB'
+                free_memory_text = fb_memory_usage.find('free').text if fb_memory_usage.find('free') is not None else '0 MiB'
+                
+                # 移除单位 " MiB" 并转换为整数
+                try:
+                    total_memory_mb = int(total_memory_text.replace(' MiB', ''))
+                    used_memory_mb = int(used_memory_text.replace(' MiB', ''))
+                    free_memory_mb = int(free_memory_text.replace(' MiB', ''))
+                except ValueError as ve:
+                    print(f"警告: GPU {gpu_id} 显存值 '{total_memory_text}, {used_memory_text}, {free_memory_text}' 无法转换为整数: {ve}。跳过此GPU。")
+                    continue
+            else:
+                print(f"警告: GPU {gpu_id} 未找到显存信息，跳过。")
+                continue # 如果没有显存信息，跳过此GPU
+
+            # 获取GPU名称 (保留名称以便识别是哪张卡)
+            gpu_name_elem = gpu_elem.find('product_name')
+            gpu_name = gpu_name_elem.text if gpu_name_elem is not None else "Unknown GPU"
+
+            # 仅比较已用显存，找出使用最多的GPU
+            if used_memory_mb > max_used_memory_mb:
+                max_used_memory_mb = used_memory_mb
+                most_used_gpu_info = {
+                    'index': gpu_id,
+                    'name': gpu_name,
+                    'total_memory_mb': total_memory_mb,
+                    'free_memory_mb': free_memory_mb,
+                    'used_memory_mb': used_memory_mb,
+                }
+        
+        return most_used_gpu_info
+
+    except FileNotFoundError:
+        print("错误: nvidia-smi 命令未找到。请确保NVIDIA驱动已正确安装并配置了PATH。")
+        return None
+    except subprocess.CalledProcessError as e:
+        print(f"执行 nvidia-smi 命令时发生错误: {e}")
+        print(f"标准输出: {e.stdout}")
+        print(f"标准错误: {e.stderr}")
+        return None
+    except ET.ParseError as e:
+        print(f"解析 nvidia-smi XML 输出时发生错误: {e}")
+        print(f"原始XML输出:\n{xml_output}") # 打印原始XML以便调试
+        return None
+    except Exception as e:
+        print(f"获取或解析GPU信息时发生未知错误: {e}")
+        return None
+
+
+
+def calculate_string_md5(text_string):
+    """
+    计算给定字符串的 MD5 哈希值。
+    """
+    # 将字符串编码为字节序列（通常使用 UTF-8）
+    encoded_string = text_string.encode('utf-8')
+
+    # 创建 MD5 哈希对象
+    md5_hasher = hashlib.md5()
+
+    # 更新哈希对象，传入字节序列
+    md5_hasher.update(encoded_string)
+
+    # 获取十六进制表示的 MD5 值
+    md5_hex = md5_hasher.hexdigest()
+
+    return md5_hex

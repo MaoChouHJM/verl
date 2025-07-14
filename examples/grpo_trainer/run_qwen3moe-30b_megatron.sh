@@ -1,6 +1,10 @@
 set -x
 
 HOME=/nlp_group/huangjiaming/
+project_name='verl_grpo_example_gsm8k_math'
+exp_name='qwen3_30b_moe_megatron'
+
+CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
 
 # moe ckpt
 HF_MODEL_PATH=/nlp_group/huangjiaming/Qwen3-30B-A3B
@@ -27,7 +31,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo --config-path=config \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=/nlp_group/huangjiaming/logits-distill/random_row.parquet \
     data.return_raw_chat=$return_raw_chat \
-    data.train_batch_size=32 \
+    data.train_batch_size=64 \
     data.max_prompt_length=1024 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=False \
@@ -56,6 +60,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.temperature=0.0 \
     actor_rollout_ref.rollout.n=4 \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=4 \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=1 \
@@ -69,8 +74,11 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo --config-path=config \
     trainer.logger=['console'] \
     trainer.project_name='verl_grpo_example_gsm8k_math' \
     trainer.experiment_name='qwen3_30b_moe_megatron' \
+    trainer.project_name="${project_name}" \
+    trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=4 \
     trainer.save_freq=20 \
     trainer.test_freq=5 \
+    trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.total_epochs=15 2>&1 | tee qwen3_moe_$timestamp.log

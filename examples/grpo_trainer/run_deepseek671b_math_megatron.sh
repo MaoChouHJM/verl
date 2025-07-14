@@ -90,6 +90,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.top_k=-1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$INFER_TP \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     +actor_rollout_ref.rollout.override_config.chunked_prefill_size=32768 \
     +actor_rollout_ref.rollout.override_config.moe_dense_tp_size=1 \
     +actor_rollout_ref.rollout.override_config.enable_deepep_moe=True \

@@ -21,6 +21,8 @@ import asyncio
 import logging
 import os
 import time
+import gc
+import torch
 
 from omegaconf import DictConfig
 from sglang.srt.entrypoints.engine import Engine
@@ -31,7 +33,7 @@ from contextlib import contextmanager
 from verl.protocol import DataProto, all_gather_data_proto
 from verl.utils.device import get_torch_device
 from verl.utils.megatron_utils import load_megatron_model_to_gpu, offload_megatron_model_to_cpu, per_tensor_generator
-from verl.utils.profiler import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
+from verl.utils.profiler import GPUMemoryLogger, log_gpu_memory_usage, simple_timer, get_most_used_gpu_memory, calculate_string_md5
 
 from .base import BaseShardingManager
 
@@ -127,6 +129,12 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         loop.run_until_complete(self.sleep())
 
     async def update_weights(self, params):
+        def is_reach_max_packed_usage(packed_name_tensor, free_mem):
+            size = sum([t.numel() * t.element_size() for _, t in packed_name_tensor])
+            # mcore : 1; sglang: 1 (deserialize) + 1 (broadcast)
+            total_size = size * 2 / (1024**3)
+            return  total_size > free_mem
+
         timing = {}
         if self.device_mesh["tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
             await self.inference_engine.resume_memory_occupation()
@@ -136,29 +144,63 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         named_tensors = params
         load_format = None
         with simple_timer("weight_update_total", timing):
+            with simple_timer("get_gpu_info", timing):
+                gpu_info = get_most_used_gpu_memory()
+            free_mem = gpu_info["free_memory_mb"] / 1024 if gpu_info is not None else -1  
             start_time = time.time()
-            for tensor_index, (name, tensor) in enumerate(named_tensors):
+            packed_name_tensor = []
+            for tensor_index, (param_name, tensor) in enumerate(named_tensors):
+                packed_name_tensor.append((param_name, tensor.detach()))
+                if not is_reach_max_packed_usage(packed_name_tensor, free_mem):
+                    continue
                 cur_time = time.time()
+                name = ",".join([n for (n, _) in packed_name_tensor])
+                name = calculate_string_md5(name)
                 timing[f'generate_weight_{name}'] = cur_time - start_time
-                timing[f'weight_shape_{name}'] = tensor.shape
-                timing[f'weight_dtype_{name}'] = tensor.dtype
+                timing[f'packed_tensor_size_{name}'] = sum([t.numel() * t.element_size() for _, t in packed_name_tensor]) / (1024**3)
+                timing[f'max_mem_allocated_gb_{name}'] = get_torch_device().max_memory_allocated() / (1024**3) 
+                timing[f'max_mem_reserved_gb_{name}'] = get_torch_device().max_memory_reserved() / (1024**3) 
                 with simple_timer(f"update_tensor_{name}", timing):
                     if self.device_mesh["tp"].get_local_rank() == 0:
                         success, sglang_time = await self.inference_engine.update_weights_from_tensor(
-                            named_tensors=[
-                                (
-                                    name,
-                                    tensor.detach(),
-                                )
-                            ],
+                            named_tensors=packed_name_tensor,
                             load_format=load_format,
-                            flush_cache=False,
+                            flush_cache=True,
                         )
                         timing[f'sglang_cost_time_{name}'] = sglang_time
                 with simple_timer(f"flush_cache_{name}", timing):
                     if self.device_mesh["tp"].get_local_rank() == 0:
                         await self.inference_engine.flush_cache()
+                with simple_timer(f'empty_mcore_cahce_{name}', timing):
+                    packed_name_tensor = []
+                    gc.collect()
+                    torch.cuda.empty_cache()
                 start_time = time.time()
+            else:
+                cur_time = time.time()
+                name = ",".join([n for (n, _) in packed_name_tensor])
+                name = calculate_string_md5(name)
+                timing[f'generate_weight_{name}'] = cur_time - start_time
+                timing[f'packed_tensor_size_{name}'] = sum([t.numel() * t.element_size() for _, t in packed_name_tensor]) / (1024**3)
+                timing[f'max_mem_allocated_gb_{name}'] = get_torch_device().max_memory_allocated() / (1024**3) 
+                timing[f'max_mem_reserved_gb_{name}'] = get_torch_device().max_memory_reserved() / (1024**3) 
+                with simple_timer(f"update_tensor_{name}", timing):
+                    if self.device_mesh["tp"].get_local_rank() == 0:
+                        success, sglang_time = await self.inference_engine.update_weights_from_tensor(
+                            named_tensors=packed_name_tensor,
+                            load_format=load_format,
+                            flush_cache=True,
+                        )
+                        timing[f'sglang_cost_time_{name}'] = sglang_time
+                with simple_timer(f"flush_cache_{name}", timing):
+                    if self.device_mesh["tp"].get_local_rank() == 0:
+                        await self.inference_engine.flush_cache()
+                with simple_timer(f'empty_mcore_cahce_{name}', timing):
+                    packed_name_tensor = []
+                    gc.collect()
+                    torch.cuda.empty_cache()
+            assert len(packed_name_tensor) == 0
+
 
             with simple_timer(f"post_update_weight", timing):
                 if self.device_mesh["tp"].get_local_rank() == 0:
