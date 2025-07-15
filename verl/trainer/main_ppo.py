@@ -41,26 +41,30 @@ def run_ppo(config) -> None:
     # isolation, will solve in the future
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     user_custom_env = config.get("user_custom_env", {})
-    print(f"{user_custom_env=}")
+    print(f"User custom env: {user_custom_env}")
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
         # Set environment variables in the runtime environment to control tokenizer parallelism,
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
+        env_vars = {
+            "TOKENIZERS_PARALLELISM": "true",
+            "NCCL_DEBUG": "WARN",
+            #"NCCL_IB_DISABLE": "0",
+            #"NCCL_IB_GID_INDEX": "3",
+            #"NCCL_SOCKET_IFNAME": "eth",
+            #"NCCL_IB_HCA": "mlx5",
+            "VLLM_LOGGING_LEVEL": "INFO",
+            "TIMESTAMP": os.environ.get("TIMESTAMP", 'null'),
+            "MONDB_PROJECT_NAME": os.environ.get("MONDB_PROJECT_NAME", 'none'),
+        }
+        
+        if user_custom_env:
+            env_vars.update(user_custom_env)
+        
         ray.init(
-            runtime_env={
-                "env_vars": {"TOKENIZERS_PARALLELISM": "true",
-                             "NCCL_DEBUG": "WARN",
-                             #"NCCL_IB_DISABLE": "0",
-                             #"NCCL_IB_GID_INDEX": "3",
-                             #"NCCL_SOCKET_IFNAME": "eth",
-                             #"NCCL_IB_HCA": "mlx5",
-                             "VLLM_LOGGING_LEVEL": "INFO",
-                             "TIMESTAMP": os.environ.get("TIMESTAMP", 'null'),
-                             "MONDB_PROJECT_NAME": os.environ.get("MONDB_PROJECT_NAME", 'none'),
-                             }.update(user_custom_env)
-            },
+            runtime_env={"env_vars": env_vars},
             num_cpus=config.ray_init.num_cpus,
         )
 
