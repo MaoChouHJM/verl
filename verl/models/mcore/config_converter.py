@@ -17,6 +17,7 @@
 # convert huggingface config to mcore transformer config
 
 
+from unittest import removeResult
 import torch
 import torch.nn.functional as F
 from megatron.core import parallel_state as mpu
@@ -450,3 +451,9 @@ def hf_to_mcore_config_llama4(
 ) -> TransformerConfig:
     # Llama4ForConditionalGeneration
     raise NotImplementedError("Llama4ForConditionalGeneration is not supported yet")
+
+
+def hf_to_mcore_config_keye(
+    hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
+) -> TransformerConfig:
+    return hf_to_mcore_config_dpskv3(hf_config,dtype, **override_transformer_config_kwargs)

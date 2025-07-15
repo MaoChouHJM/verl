@@ -28,12 +28,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 import verl.utils.torch_functional_vl as verl_F
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.dataset import RLHFDataset
-
-
 import sys
-print("Script's Python executable:", sys.executable)
-print("Script's sys.path:", sys.path)
-# 尝试导入
 try:
     import recovlm
     from recovlm.data.datasets import ChatCompletionVisionParquetDataset_keye, get_rope_index
@@ -45,7 +40,7 @@ try:
 
     print("recovlm imported successfully in script.")
 except ModuleNotFoundError as e:
-    print(f"ModuleNotFoundError in script: {e}")
+    pass
 
 
 

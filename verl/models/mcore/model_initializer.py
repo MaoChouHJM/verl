@@ -24,6 +24,7 @@ from numpy.dtypes import BoolDType
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
+from verl.models.mcore.qwen2_5_vl import vision_config
 
 from .config_converter import PretrainedConfig, TransformerConfig
 
@@ -295,3 +296,47 @@ class Qwen25VLModel(BaseModelInitializer):
             )
 
         return qwen25_vl_model
+
+class KeyeModel(BaseModelInitializer):
+    """Initializer for Keye models."""
+
+    def get_transformer_layer_spec(self):
+        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+        return transformer_layer_spec
+
+    def initialize(
+        self,
+        pre_process=None,
+        post_process=None,
+        share_embeddings_and_output_weights=False,
+        value=False,
+        vp_stage: Optional[int] =None,
+        **extra_kwargs,
+    ):
+        tfconfig = self.tfconfig
+        transformer_layer_spec = get_gpt_decoder_block_spec(
+            tfconfig,
+            use_transformer_engine=True,
+            normalization="RMSNorm",
+            qk_l2_norm=False,
+            vp_stage=vp_stage
+        )
+        from megatron.core.models.keye import KeyeModel
+        from megatron.core.models.keye import get_vision_model_config
+        from megatron.core.models.keye.keye_layer_specs import get_vision_model_spec
+
+        vision_config = get_vision_model_config(None, tfconfig)
+        vision_transformer_layer_spec = get_vision_model_spec()
+
+        keye_model = KeyeModel(
+        transformer_config=tfconfig,
+        transformer_layer_spec=transformer_layer_spec,
+        vision_config=vision_config,
+        vision_layer_spec=vision_transformer_layer_spec,
+        pre_process=pre_process,
+        post_process=post_process,
+        mtp_block_spec=None,  #  Keye not support mtp yet
+        vp_stage=vp_stage,
+        )
+
+        return keye_model
