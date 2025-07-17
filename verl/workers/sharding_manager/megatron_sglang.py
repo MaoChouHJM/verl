@@ -177,30 +177,30 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                     torch.cuda.empty_cache()
                 start_time = time.time()
             else:
-                cur_time = time.time()
-                name = ",".join([n for (n, _) in packed_name_tensor])
-                name = calculate_string_md5(name)
-                timing[f'generate_weight_{name}'] = cur_time - start_time
-                timing[f'packed_tensor_size_{name}'] = sum([t.numel() * t.element_size() for _, t in packed_name_tensor]) / (1024**3)
-                timing[f'max_mem_allocated_gb_{name}'] = get_torch_device().max_memory_allocated() / (1024**3) 
-                timing[f'max_mem_reserved_gb_{name}'] = get_torch_device().max_memory_reserved() / (1024**3) 
-                with simple_timer(f"update_tensor_{name}", timing):
-                    if self.device_mesh["tp"].get_local_rank() == 0:
-                        success, sglang_time = await self.inference_engine.update_weights_from_tensor(
-                            named_tensors=packed_name_tensor,
-                            load_format=load_format,
-                            flush_cache=True,
-                        )
-                        timing[f'sglang_cost_time_{name}'] = sglang_time
-                with simple_timer(f"flush_cache_{name}", timing):
-                    if self.device_mesh["tp"].get_local_rank() == 0:
-                        await self.inference_engine.flush_cache()
-                with simple_timer(f'empty_mcore_cahce_{name}', timing):
-                    packed_name_tensor = []
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                if len(packed_name_tensor) != 0:
+                    cur_time = time.time()
+                    name = ",".join([n for (n, _) in packed_name_tensor])
+                    name = calculate_string_md5(name)
+                    timing[f'generate_weight_{name}'] = cur_time - start_time
+                    timing[f'packed_tensor_size_{name}'] = sum([t.numel() * t.element_size() for _, t in packed_name_tensor]) / (1024**3)
+                    timing[f'max_mem_allocated_gb_{name}'] = get_torch_device().max_memory_allocated() / (1024**3) 
+                    timing[f'max_mem_reserved_gb_{name}'] = get_torch_device().max_memory_reserved() / (1024**3) 
+                    with simple_timer(f"update_tensor_{name}", timing):
+                        if self.device_mesh["tp"].get_local_rank() == 0:
+                            success, sglang_time = await self.inference_engine.update_weights_from_tensor(
+                                named_tensors=packed_name_tensor,
+                                load_format=load_format,
+                                flush_cache=True,
+                            )
+                            timing[f'sglang_cost_time_{name}'] = sglang_time
+                    with simple_timer(f"flush_cache_{name}", timing):
+                        if self.device_mesh["tp"].get_local_rank() == 0:
+                            await self.inference_engine.flush_cache()
+                    with simple_timer(f'empty_mcore_cahce_{name}', timing):
+                        packed_name_tensor = []
+                        gc.collect()
+                        torch.cuda.empty_cache()
             assert len(packed_name_tensor) == 0
-
 
             with simple_timer(f"post_update_weight", timing):
                 if self.device_mesh["tp"].get_local_rank() == 0:

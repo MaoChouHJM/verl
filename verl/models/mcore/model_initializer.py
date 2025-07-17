@@ -67,7 +67,7 @@ class BaseModelInitializer(ABC):
         Returns:
             GPTModel: An initialized GPT model instance
         """
-        transformer_layer_spec = self.get_transformer_layer_spec()
+        transformer_layer_spec = self.get_transformer_layer_spec(vp_stage=vp_stage)
         rope_scaling_args = self.get_rope_scaling_args()
         mtp_block_spec = extra_kwargs.get("mtp_block_spec", None)
         model = GPTModel(
@@ -98,17 +98,17 @@ class BaseModelInitializer(ABC):
 class DenseModel(BaseModelInitializer):
     """Initializer for dense models like Llama and Qwen2."""
 
-    def get_transformer_layer_spec(self):
+    def get_transformer_layer_spec(self, vp_stage: Optional[int] = None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
-        return get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+        return get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, vp_stage=vp_stage)
 
 
 class Qwen2MoEModel(BaseModelInitializer):
     """Initializer for Qwen2 MoE models."""
 
-    def get_transformer_layer_spec(self):
+    def get_transformer_layer_spec(self, vp_stage: Optional[int] = None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, vp_stage=vp_stage)
 
         # Patch layer spec for shared experts
         for i in range(len(transformer_layer_spec.layer_specs)):
@@ -129,9 +129,9 @@ class Qwen2MoEModel(BaseModelInitializer):
 class MixtralModel(BaseModelInitializer):
     """Initializer for Mixtral models."""
 
-    def get_transformer_layer_spec(self):
+    def get_transformer_layer_spec(self, vp_stage: Optional[int] = None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, vp_stage=vp_stage)
         return transformer_layer_spec
 
     def initialize(self, **kwargs):
@@ -146,9 +146,9 @@ class MixtralModel(BaseModelInitializer):
 class Qwen3MoEModel(BaseModelInitializer):
     """Initializer for Qwen3 MoE models."""
 
-    def get_transformer_layer_spec(self):
+    def get_transformer_layer_spec(self, vp_stage: Optional[int] = None):
         assert self.tfconfig.normalization == "RMSNorm", "only RMSNorm is supported for now"
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, vp_stage=vp_stage)
         return transformer_layer_spec
 
     def initialize(self, **kwargs):
@@ -164,8 +164,8 @@ class Qwen3MoEModel(BaseModelInitializer):
 class DeepseekV3Model(BaseModelInitializer):
     """Initializer for DeepseekV3 models."""
 
-    def get_transformer_layer_spec(self):
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+    def get_transformer_layer_spec(self, vp_stage: Optional[int] = None):
+        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, vp_stage=vp_stage)
         return transformer_layer_spec
 
     def get_rope_scaling_args(self) -> dict:
@@ -197,8 +197,8 @@ class DeepseekV3Model(BaseModelInitializer):
 class Qwen25VLModel(BaseModelInitializer):
     """Initializer for Qwen2.5 VL models."""
 
-    def get_transformer_layer_spec(self):
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+    def get_transformer_layer_spec(self, vp_stage: Optional[int] = None):
+        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True, vp_stage=vp_stage)
         return transformer_layer_spec
 
     def initialize(

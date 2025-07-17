@@ -194,11 +194,10 @@ def get_mcore_forward_fn(hf_config: PretrainedConfig) -> Callable:
     return MODEL_FORWARD_REGISTRY[model]
 
 
-def get_mcore_weight_converter(hf_config: PretrainedConfig, dtype: torch.dtype) -> Callable:
+def get_mcore_weight_converter(hf_config: PretrainedConfig, tf_config: TransformerConfig, dtype: torch.dtype) -> Callable:
     """
     Get the weight converter for given model architecture.
     """
     assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
     model = get_supported_model(hf_config.architectures[0])
-    tfconfig = hf_to_mcore_config(hf_config, dtype)
-    return MODEL_WEIGHT_CONVERTER_REGISTRY[model](hf_config, tfconfig)
+    return MODEL_WEIGHT_CONVERTER_REGISTRY[model](hf_config, tf_config)

@@ -21,6 +21,7 @@ import socket
 import hydra
 import ray
 import os
+import pprint
 from omegaconf import OmegaConf
 
 from verl.trainer.constants_ppo import PPO_RAY_RUNTIME_ENV
@@ -48,6 +49,10 @@ def run_ppo(config) -> None:
         # Set environment variables in the runtime environment to control tokenizer parallelism,
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
+        
+        # Megatron-LM EA version detect from installed whl
+        mcore_ea_version = os.popen(" pip list | grep megatron-core | awk '{print $2}'").read().strip() \
+                            != "0.12.1" 
         env_vars = {
             "TOKENIZERS_PARALLELISM": "true",
             "NCCL_DEBUG": "WARN",
@@ -58,11 +63,13 @@ def run_ppo(config) -> None:
             "VLLM_LOGGING_LEVEL": "INFO",
             "TIMESTAMP": os.environ.get("TIMESTAMP", 'null'),
             "MONDB_PROJECT_NAME": os.environ.get("MONDB_PROJECT_NAME", 'none'),
+            "MEGATRON_EA_VERSION": str(mcore_ea_version),
         }
         
         if user_custom_env:
             env_vars.update(user_custom_env)
         
+        pprint.pprint(f"ray init env : {env_vars}")
         ray.init(
             runtime_env={"env_vars": env_vars},
             num_cpus=config.ray_init.num_cpus,

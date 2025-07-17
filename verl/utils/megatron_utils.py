@@ -62,19 +62,18 @@ def get_model(
         )
         model = []
         for i in range(mpu.get_virtual_pipeline_model_parallel_world_size()):
-            mpu.set_virtual_pipeline_model_parallel_rank(i)
+            #mpu.set_virtual_pipeline_model_parallel_rank(i)
             # Set pre_process and post_process only after virtual rank is set.
-            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False)
-            post_process = mpu.is_pipeline_last_stage(ignore_virtual=False)
+            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=i)
+            post_process = mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=i)
             this_model = model_provider_func(pre_process=pre_process, post_process=post_process, vp_stage=i)
             #this_model = model_provider_func(pre_process=pre_process, post_process=post_process)
             this_model.model_type = model_type
             this_model.vp_stage = i
             model.append(this_model)
-        mpu.set_virtual_pipeline_model_parallel_rank(0)
     else:
-        pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False)
-        post_process = mpu.is_pipeline_last_stage(ignore_virtual=False)
+        pre_process = mpu.is_pipeline_first_stage()
+        post_process = mpu.is_pipeline_last_stage()
         add_encoder = True
         add_decoder = True
         if model_type == ModelType.encoder_and_decoder:
@@ -792,6 +791,7 @@ def per_tensor_generator(
     )
     layer_list_meta = [item for sublist in obj_spec_output for item in sublist]
 
+
     gen_func = tensor_generator()
 
     # lazy load tensor for full model
@@ -886,6 +886,16 @@ def per_tensor_generator(
 
 
 def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConfig):
+    if os.environ["MEGATRON_EA_VERSION"].lower() == "true":
+        return get_transformer_layer_offset_EA(pipeline_rank, vp_rank, config)
+    else:
+        return get_transformer_layer_offset_main(pipeline_rank, vp_rank, config)
+
+def get_transformer_layer_offset_EA(pipeline_rank, vp_rank, config: TransformerConfig):
+    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
+    return get_transformer_layer_offset(config, vp_stage=vp_rank)
+
+def get_transformer_layer_offset_main(pipeline_rank, vp_rank, config: TransformerConfig):
     '''
     Get the index offset of any pipeline stage, given the level of pipelining.
 

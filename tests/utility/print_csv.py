@@ -24,8 +24,13 @@ def parse_csv_and_print_column(file_path, column_name):
             print(f"--- '{column_name}' 列的值 ---")
             for row in reader:
                 # 每一行都是一个字典，通过列名作为键来访问值
-                print(row[column_name])
-
+                #print(row[column_name])
+                name = row[column_name]
+                split_tokens = name.split('.')
+                if len(split_tokens) > 3:
+                    print(split_tokens[2])
+                else:
+                    print(name)
     except FileNotFoundError:
         print(f"错误：文件 '{file_path}' 未找到。请检查文件路径是否正确。")
     except Exception as e:
@@ -39,6 +44,6 @@ if __name__ == "__main__":
     # 调用函数解析并打印 'name' 列
     parse_csv_and_print_column(csv_file, target_column)
 
-    print("\n--- 尝试打印不存在的列 ---")
+    #print("\n--- 尝试打印不存在的列 ---")
     #parse_csv_and_print_column(csv_file, 'email') # 尝试打印一个不存在的列
 
