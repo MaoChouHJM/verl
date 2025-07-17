@@ -15,15 +15,28 @@
 # limitations under the License.
 
 # use mcore transformer config to initialize the model
+import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Union
 
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec, get_gpt_mtp_block_spec
+from numpy.dtypes import BoolDType
+
+from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 
 from .config_converter import PretrainedConfig, TransformerConfig
 
 
+def get_gpt_decoder_block_spec(config : TransformerConfig,
+                               use_transformer_engine : bool,
+                               vp_stage: Optional[int] = None,
+) -> TransformerBlockSubmodules:
+    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec as get_gpt_decoder_block_spec_mcore
+    if os.environ["MEGATRON_EA_VERSION"].lower() == "true":
+        return get_gpt_decoder_block_spec_mcore(config, use_transformer_engine=use_transformer_engine, vp_stage=vp_stage)
+    else:
+        return get_gpt_decoder_block_spec_mcore(config, use_transformer_engine=use_transformer_engine)
 class BaseModelInitializer(ABC):
     """Base class for model initializers."""
 
@@ -70,20 +83,37 @@ class BaseModelInitializer(ABC):
         transformer_layer_spec = self.get_transformer_layer_spec(vp_stage=vp_stage)
         rope_scaling_args = self.get_rope_scaling_args()
         mtp_block_spec = extra_kwargs.get("mtp_block_spec", None)
-        model = GPTModel(
-            config=self.tfconfig,
-            transformer_layer_spec=transformer_layer_spec,
-            vocab_size=self.hf_config.vocab_size,
-            max_sequence_length=self.hf_config.max_position_embeddings,
-            pre_process=pre_process,
-            post_process=post_process,
-            share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-            position_embedding_type="rope",
-            rotary_base=self.hf_config.rope_theta,
-            **rope_scaling_args,
-            mtp_block_spec=mtp_block_spec,
-            vp_stage=vp_stage,
-        )
+        
+
+        if os.environ["MEGATRON_EA_VERSION"].lower() == "true":
+            model = GPTModel(
+                config=self.tfconfig,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=self.hf_config.vocab_size,
+                max_sequence_length=self.hf_config.max_position_embeddings,
+                pre_process=pre_process,
+                post_process=post_process,
+                share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+                position_embedding_type="rope",
+                rotary_base=self.hf_config.rope_theta,
+                **rope_scaling_args,
+                mtp_block_spec=mtp_block_spec,
+                vp_stage=vp_stage,
+            )
+        else:
+            model = GPTModel(
+                config=self.tfconfig,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=self.hf_config.vocab_size,
+                max_sequence_length=self.hf_config.max_position_embeddings,
+                pre_process=pre_process,
+                post_process=post_process,
+                share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+                position_embedding_type="rope",
+                rotary_base=self.hf_config.rope_theta,
+                **rope_scaling_args,
+                mtp_block_spec=mtp_block_spec,
+            )
 
         if post_process and value:
             from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
@@ -183,7 +213,8 @@ class DeepseekV3Model(BaseModelInitializer):
         # MTP
         if self.tfconfig.mtp_num_layers is not None:
             transformer_layer_spec = self.get_transformer_layer_spec()
-            mtp_block_spec = get_gpt_mtp_block_spec(self.tfconfig, transformer_layer_spec, use_transformer_engine=True)
+            mtp_block_spec = get_gpt_mtp_block_spec(self.tfconfig,
+                 transformer_layer_spec, use_transformer_engine=True, vp_stage=kwargs.get("vp_stage", None))
             kwargs["mtp_block_spec"] = mtp_block_spec
 
         model = super().initialize(**kwargs)
