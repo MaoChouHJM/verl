@@ -15,31 +15,19 @@
 import copy
 import os
 import re
+import json
 from collections import defaultdict
+from tkinter import N, NE
 from typing import List, Optional, Union
 
 import datasets
 import numpy as np
 import torch
 from omegaconf import DictConfig, ListConfig
-from torch.utils.data import Dataset
-from transformers import PreTrainedTokenizer, ProcessorMixin
+from transformers import PreTrainedTokenizer, ProcessorMixin, AutoConfig
 
 import verl.utils.torch_functional_vl as verl_F
-from verl.utils.model import compute_position_id_with_mask
 from verl.utils.dataset import RLHFDataset
-import sys
-try:
-    import recovlm
-    from recovlm.data.datasets import ChatCompletionVisionParquetDataset_keye, get_rope_index
-    from recovlm.utils.qwen_vl_utils import process_vision_info
-    class SkipBuildSourceDataset(ChatCompletionVisionParquetDataset_keye):
-      # NOTE(huangjiaming): here we dont build dataset, we build outside
-      def _build_source_dataset(self, sources):
-          return None, -1
-except ModuleNotFoundError as e:
-    pass
-
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -62,7 +50,7 @@ def collate_fn(data_list: list[dict]) -> dict:
     return {**tensors, **non_tensors}
 
 
-class Qwen3RLHFDataset(RLHFDataset):
+class KeyeQwen3SlowFastDataset(RLHFDataset):
     """
     We assume the dataset contains a column that contains prompts and other information
     """
@@ -79,10 +67,25 @@ class Qwen3RLHFDataset(RLHFDataset):
 
         self.data_files = copy.deepcopy(data_files)
         self.original_data_files = copy.deepcopy(data_files)  # use for resume
-        # we use the tokenizer and processor in qwen3dataset
-        #self.qwen3_dataset.tokenizer = tokenizer
-        #self.qwen3_dataset.processor = processor
+        self.tokenizer = tokenizer
+        self.processor = processor
+        self.use_slow_fast = config.get("use_slow_fast", None)
+        base_model_dir = config.get("base_model_dir", None)
+        assert self.tokenizer is not None
+        assert self.processor is not None
+        assert self.use_slow_fast is not None
+        assert base_model_dir is not None
         self.config = config
+        self.hf_config = AutoConfig.from_pretrained(base_model_dir)
+        
+        if self.use_slow_fast:
+            from .keye_processors.utils_slowfast import process_vision_info, get_rope_index_slowfast
+            self.process_vision_info_func = process_vision_info
+            self.get_rope_index_func = get_rope_index_slowfast
+        else:
+            from .keye_processors.utils import process_vision_info, get_rope_index
+            self.process_vision_info_func = process_vision_info
+            self.get_rope_index_func = get_rope_index
 
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "messages")
@@ -96,18 +99,9 @@ class Qwen3RLHFDataset(RLHFDataset):
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count())
-
         # whether to store the dataset in state_dict()
         # default not store
         self.serialize_dataset = False
-        dataset_config = {"sources": "",
-                          "num_workers": 8,
-                          "base_model_dir": config['base_model_dir']
-                         }
-        #with open(config['hf_dataset_config'], encoding="utf-8") as f:
-        #    import json
-        #    dataset_config = json.loads(f.read())
-        self.qwen3_dataset = SkipBuildSourceDataset(**dataset_config) 
         self._read_files_and_tokenize()
 
     def _read_files_and_tokenize(self):
@@ -122,7 +116,7 @@ class Qwen3RLHFDataset(RLHFDataset):
 
         # filter out too long prompts
         if self.filter_overlong_prompts:
-            tokenizer = self.qwen3_dataset.tokenizer
+            tokenizer = self.tokenizer
             prompt_key = self.prompt_key
             self.dataframe = self.dataframe.filter(
                 lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
@@ -134,7 +128,7 @@ class Qwen3RLHFDataset(RLHFDataset):
             print(f"filter dataset len: {len(self.dataframe)}")
 
         #if self.filter_overlong_prompts:
-        #    tokenizer = self.qwen3_dataset.tokenizer
+        #    tokenizer = self.tokenizer
         #    prompt_key = self.prompt_key
         #    self.dataframe = self.dataframe.filter(
         #        lambda doc: self.image_key in doc,
@@ -163,7 +157,6 @@ class Qwen3RLHFDataset(RLHFDataset):
         if (self.image_key in example and example[self.image_key] != None) or (self.video_key in example and example[self.video_key] != None):
             image_idx = 0
             video_idx = 0
-            #print(f'{example=}', flush=True)
             for message in messages:
                 content = message["content"]
                 content_list = []
@@ -193,8 +186,7 @@ class Qwen3RLHFDataset(RLHFDataset):
 
                         if self.video_key in example:
                             for idx, video_path in enumerate(example[self.video_key]):
-                                message["content"].insert(0+ idx, {"type": "video", "video": image_path})
-
+                                message["content"].insert(0+ idx, {"type": "video", "video": video_path})
         return messages
 
     def __getitem__(self, item):
@@ -208,25 +200,13 @@ class Qwen3RLHFDataset(RLHFDataset):
         row_dict["messages"] = origin_messages
 
         model_inputs = {}
-
-        from verl.utils.dataset.vision_utils import process_image, process_video
-
-        raw_prompt = self.qwen3_dataset.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-
+        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         multi_modal_data = {}
 
         images = None
         videos = None
-        # NOTE(huangjiaming): not work for qwen3
-        #if self.image_key in row_dict:
-        #    images = [process_image(image) for image in row_dict.pop(self.image_key)]
-        #    multi_modal_data["image"] = images
 
-        #if self.video_key in row_dict:
-        #    videos = [process_video(video) for video in row_dict.pop(self.video_key)]
-        #    multi_modal_data["video"] = [video.numpy() for video in videos]
-
-        images, videos = process_vision_info(messages)
+        images, videos = self.process_vision_info_func(messages)
 
         if self.image_key in row_dict and row_dict[self.image_key] != None:
             #images = [process_image(image) for image in row_dict.pop(self.image_key)]
@@ -236,12 +216,7 @@ class Qwen3RLHFDataset(RLHFDataset):
             #videos = [process_video(video) for video in row_dict.pop(self.video_key)]
             multi_modal_data["video"] = [video.numpy() for video in videos]
 
-        # here we pad fake image
-        #if images == None:
-        #    from PIL import Image
-        #    images = [Image.fromarray(np.zeros((50,50, 3), dtype=np.uint8)).convert("RGB")]
-
-        model_inputs = self.qwen3_dataset.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
+        model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
 
         input_ids = model_inputs.pop("input_ids")
         attention_mask = model_inputs.pop("attention_mask")
@@ -258,22 +233,34 @@ class Qwen3RLHFDataset(RLHFDataset):
         # second_per_grid_ts isn't used for training, just for mrope
         row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
-        position_ids = get_rope_index(
-                input_ids=input_ids,
-                image_grid_thw=model_inputs.get("image_grid_thw"),
-                video_grid_thw=model_inputs.get("video_grid_thw"),
-                spatial_merge_size=self.qwen3_dataset.spatial_merge_size,
-                image_token_id=self.qwen3_dataset.image_token_id,
-                video_token_id=self.qwen3_dataset.video_token_id,
-                vision_start_token_id=self.qwen3_dataset.vision_start_token_id
-            ).transpose(0,1)  # (bs, 3, seq_len)
+        if self.use_slow_fast:
+            position_ids = self.get_rope_index_func(
+                    input_ids=input_ids,
+                    image_grid_thw=model_inputs.get("image_grid_thw"),
+                    video_grid_thw=model_inputs.get("video_grid_thw"),
+                    spatial_merge_size=self.hf_config.spatial_merge_size,
+                    image_token_id=self.hf_config.image_token_id,
+                    video_token_id=self.hf_config.video_token_id,
+                    vision_start_token_id=self.hf_config.vision_start_token_id,
+                    fast_video_token_id=self.hf_config.fast_video_token_id
+                ).transpose(0,1)  # (bs, 3, seq_len)
+        else:
+            position_ids = self.get_rope_index_func(
+                    input_ids=input_ids,
+                    image_grid_thw=model_inputs.get("image_grid_thw"),
+                    video_grid_thw=model_inputs.get("video_grid_thw"),
+                    spatial_merge_size=self.hf_config.spatial_merge_size,
+                    image_token_id=self.hf_config.image_token_id,
+                    video_token_id=self.hf_config.video_token_id,
+                    vision_start_token_id=self.hf_config.vision_start_token_id
+                ).transpose(0,1)  # (bs, 3, seq_len)
 
         input_ids, attention_mask, position_ids = verl_F.postprocess_data(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             max_length=self.max_prompt_length,
-            pad_token_id=self.qwen3_dataset.tokenizer.pad_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
             left_pad=True,
             truncation=self.truncation,
         )
@@ -283,7 +270,7 @@ class Qwen3RLHFDataset(RLHFDataset):
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
 
-        raw_prompt_ids = self.qwen3_dataset.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
         if len(raw_prompt_ids) > self.max_prompt_length:
             if self.truncation == "left":
                 raw_prompt_ids = raw_prompt_ids[-self.max_prompt_length :]

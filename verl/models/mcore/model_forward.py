@@ -148,7 +148,7 @@ def gptmodel_forward_qwen2_5_vl(
     return output
 
 
-def gptmodel_forward_keye(
+def gptmodel_forward_keye_qwen3_slowfast(
     model,
     input_ids,
     attention_mask,

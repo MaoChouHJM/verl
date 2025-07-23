@@ -33,12 +33,12 @@ from .config_converter import (
     hf_to_mcore_config_qwen2_5_vl,
     hf_to_mcore_config_qwen2moe,
     hf_to_mcore_config_qwen3moe,
-    hf_to_mcore_config_keye,
+    hf_to_mcore_config_keye_qwen3_slowfast,
 )
 from .model_forward import (
     gptmodel_forward,
     gptmodel_forward_qwen2_5_vl,
-    gptmodel_forward_keye,
+    gptmodel_forward_keye_qwen3_slowfast,
 )
 from .model_initializer import (
     BaseModelInitializer,
@@ -48,7 +48,7 @@ from .model_initializer import (
     Qwen2MoEModel,
     Qwen3MoEModel,
     Qwen25VLModel,
-    KeyeModel,
+    KeyeQwen3SlowFastModel,
 )
 from .weight_converter import (
     McoreToHFWeightConverterDense,
@@ -57,7 +57,7 @@ from .weight_converter import (
     McoreToHFWeightConverterQwen2_5_VL,
     McoreToHFWeightConverterQwen2Moe,
     McoreToHFWeightConverterQwen3Moe,
-    McoreToHFWeightConverterKeye,
+    McoreToHFWeightConverterKeyeQwen3SlowFast,
 )
 
 
@@ -71,7 +71,7 @@ class SupportedModel(Enum):
     LLAMA4 = "Llama4ForConditionalGeneration"  # not tested
     QWEN3 = "Qwen3ForCausalLM"  # tested
     QWEN3_MOE = "Qwen3MoeForCausalLM"  # not tested
-    KEYE = "KeyeForConditionalGeneration" # tested
+    KEYE_QWEN3_SLOWFAST = "KeyeForConditionalGeneration" # tested
 
 
 # Registry for model configuration converters
@@ -86,7 +86,7 @@ MODEL_CONFIG_CONVERTER_REGISTRY: Dict[SupportedModel, Callable[[PretrainedConfig
     SupportedModel.QWEN3: hf_to_mcore_config_dense,
     SupportedModel.QWEN3_MOE: hf_to_mcore_config_qwen3moe,
     SupportedModel.QWEN2_5_VL: hf_to_mcore_config_qwen2_5_vl,
-    SupportedModel.KEYE: hf_to_mcore_config_keye,
+    SupportedModel.KEYE: hf_to_mcore_config_keye_qwen3_slowfast,
 }
 
 # Registry for model initializers
@@ -101,7 +101,7 @@ MODEL_INITIALIZER_REGISTRY: Dict[SupportedModel, Type[BaseModelInitializer]] = {
     SupportedModel.QWEN3: DenseModel,
     SupportedModel.QWEN3_MOE: Qwen3MoEModel,
     SupportedModel.QWEN2_5_VL: Qwen25VLModel,
-    SupportedModel.KEYE: KeyeModel,
+    SupportedModel.KEYE: KeyeQwen3SlowFastModel,
 }
 
 # Registry for model forward functions
@@ -116,7 +116,7 @@ MODEL_FORWARD_REGISTRY: Dict[SupportedModel, Callable] = {
     SupportedModel.QWEN3: gptmodel_forward,
     SupportedModel.QWEN3_MOE: gptmodel_forward,
     SupportedModel.QWEN2_5_VL: gptmodel_forward_qwen2_5_vl,
-    SupportedModel.KEYE: gptmodel_forward_keye,
+    SupportedModel.KEYE: gptmodel_forward_keye_qwen3_slowfast,
 }
 
 # Registry for model weight converters
@@ -129,7 +129,7 @@ MODEL_WEIGHT_CONVERTER_REGISTRY: Dict[SupportedModel, Type] = {
     SupportedModel.QWEN3: McoreToHFWeightConverterDense,
     SupportedModel.QWEN3_MOE: McoreToHFWeightConverterQwen3Moe,
     SupportedModel.QWEN2_5_VL: McoreToHFWeightConverterQwen2_5_VL,
-    SupportedModel.KEYE: McoreToHFWeightConverterKeye,
+    SupportedModel.KEYE: McoreToHFWeightConverterKeyeQwen3SlowFast,
 }
 
 

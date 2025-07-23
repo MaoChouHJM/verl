@@ -453,7 +453,7 @@ def hf_to_mcore_config_llama4(
     raise NotImplementedError("Llama4ForConditionalGeneration is not supported yet")
 
 
-def hf_to_mcore_config_keye(
+def hf_to_mcore_config_keye_qwen3_slowfast(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
     return hf_to_mcore_config_dpskv3(hf_config,dtype, **override_transformer_config_kwargs)

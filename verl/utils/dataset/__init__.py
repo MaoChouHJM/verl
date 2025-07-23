@@ -16,3 +16,4 @@ from .rl_dataset import RLHFDataset
 from .rm_dataset import RMDataset
 from .sft_dataset import SFTDataset
 from .qwen3_rl_dataset import Qwen3RLHFDataset
+from .keye_qwen3_slowfast_dataset import KeyeQwen3SlowFastDataset

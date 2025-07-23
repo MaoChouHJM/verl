@@ -487,7 +487,7 @@ class McoreToHFWeightConverterMixtral(McoreToHFWeightConverterDense):
         return convert_names, params
 
 
-class McoreToHFWeightConverterQwen3Moe(McoreToHFWeightConverterDense):
+class McoreToHFWeightConverterKeyeQwen3SlowFast(McoreToHFWeightConverterDense):
     def _convert_mlp_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
         # qwen3 moe no share expert
 

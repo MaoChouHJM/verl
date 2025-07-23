@@ -297,7 +297,7 @@ class Qwen25VLModel(BaseModelInitializer):
 
         return qwen25_vl_model
 
-class KeyeModel(BaseModelInitializer):
+class KeyeQwen3SlowFastModel(BaseModelInitializer):
     """Initializer for Keye models."""
 
     def get_transformer_layer_spec(self):
