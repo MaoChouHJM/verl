@@ -180,6 +180,8 @@ class AgentLoopWorker:
         self.model_name = "/".join(model_path.split("/")[-2:])
         local_path = copy_to_local(config.actor_rollout_ref.model.path)
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
+        if self.config.actor_rollout_ref.model.get("custom_chat_template", None) is not None:
+            self.tokenizer.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.

@@ -456,4 +456,18 @@ def hf_to_mcore_config_llama4(
 def hf_to_mcore_config_keye_qwen3_slowfast(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
-    return hf_to_mcore_config_dpskv3(hf_config,dtype, **override_transformer_config_kwargs)
+    args = _get_base_transformer_config(
+        hf_config=hf_config,
+        dtype=dtype,
+        add_bias_linear=False,
+        # qwen specific
+        mrope_section=hf_config.rope_scaling["mrope_section"],
+        # keye
+        qk_layernorm=True,
+        recompute_granularity="selective",
+        recompute_modules=["core_attn", "mlp", "layernorm"],
+    )
+    # override_transformer_config_kwargs as kwargs shall never be none
+    args.update(override_transformer_config_kwargs)
+    print(f"hf_to_mcore_config_keye_qwen3_slowfast\n\nOverridden TF init config: {args}")
+    return TransformerConfig(**args)

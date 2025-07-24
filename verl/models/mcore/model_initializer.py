@@ -17,14 +17,17 @@
 # use mcore transformer config to initialize the model
 import os
 from abc import ABC, abstractmethod
+from token import OP
 from typing import List, Optional, Tuple, Union
 
 from numpy.dtypes import BoolDType
+from pandas._libs.lib import fast_multiget
 
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec, get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 from verl.models.mcore.qwen2_5_vl import vision_config
+from verl.utils.logger import print_rank_0
 
 from .config_converter import PretrainedConfig, TransformerConfig
 
@@ -300,42 +303,59 @@ class Qwen25VLModel(BaseModelInitializer):
 class KeyeQwen3SlowFastModel(BaseModelInitializer):
     """Initializer for Keye models."""
 
-    def get_transformer_layer_spec(self):
-        transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig, use_transformer_engine=True)
+    def get_transformer_layer_spec(self, vp_stage):
+        if self.tfconfig.num_moe_experts:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig,
+             use_transformer_engine=True,
+             normalization=self.tfconfig.normalization,
+             vp_stage=vp_stage)
+        else:
+            transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                num_experts=self.tfconfig.num_moe_experts,
+                moe_grouped_gemm=self.tfconfig.moe_grouped_gemm,
+                qk_layernorm=self.tfconfig.qk_layernorm,
+                multi_latent_attention=self.tfconfig.multi_latent_attention,
+                moe_use_legacy_grouped_gemm=self.tfconfig.moe_use_legacy_grouped_gemm,
+            )
         return transformer_layer_spec
 
     def initialize(
         self,
-        pre_process=None,
-        post_process=None,
-        share_embeddings_and_output_weights=False,
-        value=False,
-        vp_stage: Optional[int] =None,
+        pre_process: bool = None,
+        post_process: bool = None,
+        vp_stage: Optional[int] = None,
         **extra_kwargs,
     ):
         tfconfig = self.tfconfig
-        transformer_layer_spec = get_gpt_decoder_block_spec(
+        transformer_layer_spec = self.get_transformer_layer_spec(
             tfconfig,
             use_transformer_engine=True,
             normalization="RMSNorm",
             qk_l2_norm=False,
             vp_stage=vp_stage
         )
-        from megatron.core.models.keye import KeyeModel
-        from megatron.core.models.keye import get_vision_model_config
-        from megatron.core.models.keye.keye_layer_specs import get_vision_model_spec
+        from .keye import KeyeModelSlowFast
+        from .keye import get_vision_model_config
+        from .keye.keye_layer_specs import get_vision_model_spec
 
-        vision_config = get_vision_model_config(None, tfconfig)
+        vision_config = get_vision_model_config(None, tfconfig) # not use args in get_vision_model_config, set it None
         vision_transformer_layer_spec = get_vision_model_spec()
 
-        keye_model = KeyeModel(
+        mtp_block_spec = None
+        if tfconfig.mtp_num_layers is not None:
+            mtp_block_spec = get_gpt_mtp_block_spec(tfconfig, transformer_layer_spec, use_transformer_engine=True)
+
+        print_rank_0(f"in KeyeQwen3SlowFastModel initialize\n\ntransformer_config={tfconfig}\n\nvision_config={vision_config}")
+        keye_model = KeyeModelSlowFast(
         transformer_config=tfconfig,
         transformer_layer_spec=transformer_layer_spec,
         vision_config=vision_config,
         vision_layer_spec=vision_transformer_layer_spec,
+        fast_vision_config=vision_config,
+        fast_vision_layer_spec=vision_transformer_layer_spec,
         pre_process=pre_process,
         post_process=post_process,
-        mtp_block_spec=None,  #  Keye not support mtp yet
+        mtp_block_spec=mtp_block_spec,
         vp_stage=vp_stage,
         )
 

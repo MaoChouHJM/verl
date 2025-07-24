@@ -120,6 +120,12 @@ class TaskRunner:
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        if self.config.actor_rollout_ref.model.get("custom_chat_template", None) is not None:
+            print(f'{self.config.model.custom_chat_template=}')
+            if self.processor is not None:
+                self.processor.chat_template = self.config.model.custom_chat_template
+            if self.tokenizer is not None:
+                self.tokenizer.chat_template = self.config.model.custom_chat_template
 
         # Version validation for vllm.
         if config.actor_rollout_ref.rollout.name in ["vllm"]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import math
+import random
 import os
 import sys
 import time
@@ -18,10 +19,13 @@ import torch.nn.functional as F
 import torchvision
 from packaging import version
 from PIL import Image
-from torchvision import io
+from torchvision import io, transforms
+from torchvision.transforms import InterpolationMode
+import traceback
 import io as py_io
 import os.path as osp
 import numpy as np
+import copy
 from einops import rearrange
 import cv2
 
@@ -171,18 +175,18 @@ def smart_nframes(
     Returns:
         int: the number of frames for video used for model inputs.
     """
-    assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
-    if "nframes" in ele:
-        nframes = ele["nframes"]
-    else:
-        fps = ele.get("fps", FPS) # 应该是走的默认FPS，按照每秒抽两帧来算
-        fps = min(fps, video_fps) # 注意，这里的video_fps是真实的后验FPS
-        # 计算每帧使用最少token的情况下，能吃多少帧，这个是用来兜底的
-        # 是否允许用户低于这个限制？
-        # print("cjx smart nfram debug VIDEO_TOTAL_PIXELS token num in llm side is {}".format(ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS)//28//28))
-        max_frames = int(ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS) / ele.get("min_pixels", VIDEO_MIN_PIXELS))
-        fps_nframes = int(total_frames / video_fps * fps) # 换算为秒数，之后计算希望抽多少帧
-        nframes = min(fps_nframes, max_frames)
+    # assert not ("fps" in ele and "nframes" in ele), "Only accept either `fps` or `nframes`"
+    # if "nframes" in ele:
+    #     nframes = ele["nframes"]
+    # else:
+    fps = ele.get("fps", FPS) # 应该是走的默认FPS，按照每秒抽两帧来算
+    fps = min(fps, video_fps) # 注意，这里的video_fps是真实的后验FPS
+    # 计算每帧使用最少token的情况下，能吃多少帧，这个是用来兜底的
+    # 是否允许用户低于这个限制？
+    # print("cjx smart nfram debug VIDEO_TOTAL_PIXELS token num in llm side is {}".format(ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS)//28//28))
+    max_frames = int(ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS) / ele.get("min_pixels", VIDEO_MIN_PIXELS))
+    fps_nframes = int(total_frames / video_fps * fps) # 换算为秒数，之后计算希望抽多少帧
+    nframes = min(fps_nframes, max_frames)
     return nframes
 
 
@@ -593,31 +597,27 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, slowfast: bool = Tr
         fast_frames = None
     fast_number = fast_frames.size(0) if fast_frames is not None else 0
 
-    video_min_pixels = kwargs.get("video_min_pixels", VIDEO_MIN_PIXELS)
-    video_total_pixels = kwargs.get("video_total_pixels", VIDEO_TOTAL_PIXELS)
-    fast_token_ratio = kwargs.get("fast_token_ratio", FAST_TOKEN_RATIO)
-
     ####### 二分，精准，但暂时弃用 #####
-    min_pixels = max(int(ele.get("min_pixels", VIDEO_MIN_PIXELS)), video_min_pixels)
-    # min_tokens = int(min_pixels / IMAGE_FACTOR / IMAGE_FACTOR)
-    # left = min_pixels / IMAGE_FACTOR / IMAGE_FACTOR
-    # right = ele.get("max_pixels", VIDEO_MAX_PIXELS) / IMAGE_FACTOR / IMAGE_FACTOR
-    # def _estimate_total_pixels(tokens_per_frame):
-    #     return slow_number * tokens_per_frame * IMAGE_FACTOR * IMAGE_FACTOR + \
-    #         fast_number * max(int(FAST_TOKEN_RATIO * tokens_per_frame), min_tokens) * IMAGE_FACTOR * IMAGE_FACTOR
+    min_pixels = max(int(ele.get("min_pixels", VIDEO_MIN_PIXELS)), VIDEO_MIN_PIXELS)
+    min_tokens = int(min_pixels / IMAGE_FACTOR / IMAGE_FACTOR)
+    left = min_pixels / IMAGE_FACTOR / IMAGE_FACTOR
+    right = ele.get("max_pixels", VIDEO_MAX_PIXELS) / IMAGE_FACTOR / IMAGE_FACTOR
+    def _estimate_total_pixels(tokens_per_frame):
+        return slow_number * tokens_per_frame * IMAGE_FACTOR * IMAGE_FACTOR + \
+            fast_number * max(int(FAST_TOKEN_RATIO * tokens_per_frame), min_tokens) * IMAGE_FACTOR * IMAGE_FACTOR
 
-    # while left < right:
-    #     mid = int(left+right) // 2
-    #     if _estimate_total_pixels(mid) > ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS):
-    #         right = mid
-    #     else:
-    #         left = mid + 1
-    # slow_max_pixels = left * IMAGE_FACTOR * IMAGE_FACTOR
+    while left < right:
+        mid = int(left+right) // 2
+        if _estimate_total_pixels(mid) > ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS):
+            right = mid
+        else:
+            left = mid + 1
+    slow_max_pixels = left * IMAGE_FACTOR * IMAGE_FACTOR
     ######
 
-    accum_slow_number = slow_number + fast_token_ratio * fast_number
-    rough_slow_token = int(ele.get("video_total_pixels", video_total_pixels) / accum_slow_number / image_factor / image_factor)
-    slow_max_pixels = max(rough_slow_token * image_factor * image_factor, video_min_pixels)
+    # accum_slow_number = slow_number + FAST_TOKEN_RATIO * fast_number
+    # rough_slow_token = int(ele.get("video_total_pixels", VIDEO_TOTAL_PIXELS) / accum_slow_number / IMAGE_FACTOR / IMAGE_FACTOR)
+    # slow_max_pixels = max(rough_slow_token * IMAGE_FACTOR * IMAGE_FACTOR, VIDEO_MIN_PIXELS)
 
     # fast tokens下限为min_tokens，极端情况下slow和fast数量一样
     # fast_max_pixels = max(int(FAST_TOKEN_RATIO * left), min_tokens) * IMAGE_FACTOR * IMAGE_FACTOR
@@ -629,19 +629,20 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, slowfast: bool = Tr
     resized_height, resized_width = smart_resize(
         height,
         width,
-        factor=image_factor,
+        factor=IMAGE_FACTOR,
         min_pixels=min_pixels,
         max_pixels=slow_max_pixels,
     )
-    real_slow_token = resized_height * resized_width / image_factor / image_factor
-    fast_max_pixels = max(int(real_slow_token * fast_token_ratio) * image_factor * image_factor, video_min_pixels)
+    real_slow_token = resized_height * resized_width / IMAGE_FACTOR / IMAGE_FACTOR
+    fast_max_pixels = max(int(real_slow_token * FAST_TOKEN_RATIO) * IMAGE_FACTOR * IMAGE_FACTOR, VIDEO_MIN_PIXELS)
     fast_resized_height, fast_resized_width = smart_resize(
         height,
         width,
-        factor=image_factor,
+        factor=IMAGE_FACTOR,
         min_pixels=min_pixels,
         max_pixels=fast_max_pixels,
     )
+
 
     if time_position is None: # image list
         slow_frames = []
@@ -679,8 +680,9 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR, slowfast: bool = Tr
                 antialias=True,
             ).float()
             fast_frames = list(fast_frames.split(1, dim=0))
+        if random.randint(0, 10000) < 5:
+            print("cjx vl debug for mp4, slow frames {}, fast frames {}, slow token is {}, fast token is {}, video dir".format(len(slow_frames), len(fast_frames) if fast_frames is not None else 0, resized_height*resized_width//28//28, fast_resized_height*fast_resized_width//28//28), ele["video"])
         
-        # print("cjx vl debug for mp4, slow frames {}, fast frames {}, slow token is {}, fast token is {}, video dir".format(len(slow_frames), len(fast_frames) if fast_frames is not None else 0, resized_height*resized_width//28//28, fast_resized_height*fast_resized_width//28//28), ele["video"])
         assert (len(slow_frames) if slow_frames is not None else 0) + (len(fast_frames) if fast_frames is not None else 0) == len(slow_fast_order)
         return slow_frames, fast_frames, time_position, slow_fast_order
     
@@ -708,7 +710,7 @@ def process_vision_info(
         image_factor: int = IMAGE_FACTOR, **kwargs
 ) -> tuple[list[Image.Image] | None, list[torch.Tensor | list[Image.Image]] | None]:
     assert conversations is not None or vision_infos is not None
-
+    torch.set_num_threads(1)
     image = kwargs.get("image", True)
     video = kwargs.get("video", True)
 
