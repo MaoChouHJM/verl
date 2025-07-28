@@ -548,6 +548,7 @@ class McoreToHFWeightConverterKeyeQwen3SlowFast(McoreToHFWeightConverterDense):
                 if name_after_language_model == "decoder.final_layernorm.weight":
                     return [f"model.norm.weight", params]
                 # model.layers.{layerid}. <- language_model.decoder.layers.{layerid}.
+                # TODO: qkv 和 gateup 拆分
                 name_map_after_layer = {
                     "self_attention.linear_qkv.layer_norm_weight": "input_layernorm.weight",
                     # "self_attention.linear_qkv.bias": [
