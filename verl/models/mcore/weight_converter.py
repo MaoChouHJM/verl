@@ -488,36 +488,103 @@ class McoreToHFWeightConverterMixtral(McoreToHFWeightConverterDense):
 
 
 class McoreToHFWeightConverterKeyeQwen3SlowFast(McoreToHFWeightConverterDense):
-    def _convert_mlp_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
-        # qwen3 moe no share expert
-
-        # 'decoder.layers.0.pre_mlp_layernorm.weight',
-        # 'decoder.layers.0.mlp.router.weight',
-        # moe1
-        # 'decoder.layers.0.mlp.experts.linear_fc1.weight0',
-        # 'decoder.layers.0.mlp.experts.linear_fc1.weight1',
-        # 'decoder.layers.0.mlp.experts.linear_fc1.weight2',
-        # 'decoder.layers.0.mlp.experts.linear_fc1.weight3',
-        # moe2
-        # 'decoder.layers.0.mlp.experts.linear_fc2.weight0',
-        # 'decoder.layers.0.mlp.experts.linear_fc2.weight1',
-        layer_number = name.split(".")[2]
+    def _convert_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
+        model_type = name.split(".")[0]
+        is_encoder = (name.split(".")[2] == "encoder")
         convert_names = []
-        if "pre_mlp_layernorm" in name:
-            convert_names.append(f"model.layers.{layer_number}.post_attention_layernorm.weight")
+        if model_type == "visual":
+            if not is_encoder:
+                # visual.vision_model. <- visual.
+                name_map_after_visual = {
+                    "embeddings.patch_embedding.weight": "embeddings.patch_embedding.weight",
+                    "embeddings.patch_embedding.bias": "embeddings.patch_embedding.bias",
+                    "embeddings.position_embedding.weight": "embeddings.position_embedding.weight",
+                    "embeddings.packing_position_embedding.weight": "embeddings.packing_position_embedding.weight",
+                    "final_layernorm.weight": "post_layernorm.weight",
+                    "final_layernorm.bias": "post_layernorm.bias",
+                }
+                name_after_visual = ".".join(name.split(".")[1:])
+                mapped_name = name_map_after_visual.get(name_after_visual, None)
+                assert len(params) == 1
+                convert_names.append(f"visual.vision_model.{mapped_name}")
+            else:
+                # visual.vision_model.encoder.layers.{layerid}. <- visual.layers.{layerid}.
+                name_map_after_layer = {
+                    "layer_norm1.weight": "layer_norm1.weight",
+                    "layer_norm2.weight": "layer_norm2.weight",
+                    "attention.q_proj.weight": "self_attn.q_proj.weight",
+                    "attention.k_proj.weight": "self_attn.k_proj.weight",
+                    "attention.v_proj.weight": "self_attn.v_proj.weight",
+                    "attention.out_proj.weight": "self_attn.out_proj.weight",
+                    "mlp.linear_fc1.weight": "mlp.fc1.weight",
+                    "mlp.linear_fc2.weight": "mlp.fc2.weight",
+
+                    "layer_norm1.bias": "layer_norm1.bias",
+                    "layer_norm2.bias": "layer_norm2.bias",
+                    "attention.q_proj.bias": "self_attn.q_proj.bias",
+                    "attention.k_proj.bias": "self_attn.k_proj.bias",
+                    "attention.v_proj.bias": "self_attn.v_proj.bias",
+                    "attention.out_proj.bias": "self_attn.out_proj.bias",
+                    "mlp.linear_fc1.bias": "mlp.fc1.bias",
+                    "mlp.linear_fc2.bias": "mlp.fc2.bias",
+                }
+                layer_number = name.split(".")[2]
+                name_after_layer = ".".join(name.split(".")[3:])
+                mapped_name = name_map_after_layer.get(name_after_layer, None)
+                assert len(params) == 1
+                convert_names.append(f"visual.vision_model.encoder.layers.{layer_number}.{mapped_name}")
+        
+        elif model_type == "mlp_AR":
+            name_after_mlp_AR = ".".join(name.split(".")[1:])
             assert len(params) == 1
-        elif "mlp.router.weight" in name:
-            convert_names.append(f"model.layers.{layer_number}.mlp.gate.weight")
-            assert len(params) == 1
-        elif "mlp.experts.linear_fc1" in name:  # split gate_proj and up_proj
-            expert_id = name.split("weight")[-1]
-            convert_names.append(f"model.layers.{layer_number}.mlp.experts.{expert_id}.gate_proj.weight")
-            convert_names.append(f"model.layers.{layer_number}.mlp.experts.{expert_id}.up_proj.weight")
-            assert len(params) == 2
-        elif "mlp.experts.linear_fc2" in name:
-            expert_id = name.split("weight")[-1]
-            convert_names.append(f"model.layers.{layer_number}.mlp.experts.{expert_id}.down_proj.weight")
-            assert len(params) == 1
+            convert_names.append(f"mlp_AR.{name_after_mlp_AR}")
+        
+        elif model_type == "language_model":
+            is_decoder = (name.split(".")[1] == "decoder")
+            name_after_language_model = ".".join(name.split(".")[1:])
+            if name_after_language_model == "embedding.word_embeddings.weight":
+                return [f"model.embed_tokens.weight", params]
+            if is_decoder:
+                if name_after_language_model == "decoder.final_layernorm.weight":
+                    return [f"model.norm.weight", params]
+                # model.layers.{layerid}. <- language_model.decoder.layers.{layerid}.
+                name_map_after_layer = {
+                    "self_attention.linear_qkv.layer_norm_weight": "input_layernorm.weight",
+                    # "self_attention.linear_qkv.bias": [
+                    #     "self_attn.q_proj.bias",
+                    #     "self_attn.k_proj.bias",
+                    #     "self_attn.v_proj.bias",
+                    # ],
+                    "self_attention.linear_qkv.weight": [
+                        "self_attn.q_proj.weight",
+                        "self_attn.k_proj.weight",
+                        "self_attn.v_proj.weight",
+                    ],
+                    "self_attention.q_layernorm.weight": "self_attn.q_norm.weight",
+                    "self_attention.k_layernorm.weight": "self_attn.k_norm.weight",
+                    "self_attention.linear_proj.weight": "self_attn.o_proj.weight",
+                    "mlp.linear_fc1.layer_norm_weight": "post_attention_layernorm.weight",
+                    "mlp.linear_fc1.weight": [
+                        "mlp.gate_proj.weight",
+                        "mlp.up_proj.weight"
+                    ],
+                    "mlp.linear_fc1.weight": "mlp.down_proj.weight",
+                }
+                name_after_layer = ".".join(name.split(".")[-3:])
+                layer_number = name.split(".")[3]
+                mapped_name = name_map_after_layer.get(name_after_layer)
+                if isinstance(mapped_name, list):
+                    assert len(params) == len(mapped_name)
+                    for one in mapped_name:
+                        convert_names.append(f"model.layers.{layer_number}.{one}")
+                else:
+                    assert len(params) == 1
+                    convert_names.append(f"model.layers.{layer_number}.{mapped_name}")
+            elif name_after_language_model == "output_layer.weight":
+                return [f"lm_head.weight", params]
         else:
-            raise NotImplementedError(f"Unsupported parameter name: {name}")
+            raise NotImplementedError(f"Unsupported model type: {model_type}")
         return convert_names, params
+    
+    def convert_param(self, name: str, params: list[torch.Tensor]) -> tuple[list[str], list[torch.Tensor]]:
+        return self._convert_param(name, params)
