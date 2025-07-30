@@ -13,7 +13,7 @@ from io import BytesIO
 
 import requests
 import torch
-from examples.keye.processors.base import SampleType
+#from examples.keye.processors.base import SampleType
 import torchvision
 from packaging import version
 from PIL import Image
@@ -24,22 +24,26 @@ from typing import Any, Optional, List, Tuple
 import io as py_io
 import os.path as osp
 
-from ..utils import get_logger
 
-logger = get_logger(__name__)
+IMAGE_FACTOR = int(os.environ.get("KEYE_IMAGE_FACTOR", 28))
+MIN_PIXELS = int(os.environ.get("MIN_PIXELS", 4 * IMAGE_FACTOR * IMAGE_FACTOR))
+MAX_PIXELS = int(os.environ.get("MAX_PIXELS", 16384 * IMAGE_FACTOR * IMAGE_FACTOR))
+print(f"recovlm IMAGE_FACTOR: {IMAGE_FACTOR} {MIN_PIXELS=} {MAX_PIXELS=}")
 
-IMAGE_FACTOR = 32
-MIN_PIXELS = 4 * 32 * 32
-MAX_PIXELS = 16384 * 32 * 32
 MAX_RATIO = 200
 
-VIDEO_MIN_PIXELS = 128 * 32 * 32
-VIDEO_MAX_PIXELS = 768 * 32 * 32
-VIDEO_TOTAL_PIXELS = 24576 * 32 * 32
+VIDEO_MIN_PIXELS = 128 * 28 * 28
+VIDEO_MAX_PIXELS = 768 * 28 * 28
+VIDEO_TOTAL_PIXELS = int(os.environ.get("VIDEO_TOTAL_PIXELS", 24576 * 28 * 28))
+print(f"recovlm VIDEO_TOTAL_PIXELS: {VIDEO_TOTAL_PIXELS}")
+# VIDEO_TOTAL_PIXELS = 24576 * 28 * 28
+
 FRAME_FACTOR = 2
 FPS = 2.0
 FPS_MIN_FRAMES = 4
-FPS_MAX_FRAMES = 768
+FPS_MAX_FRAMES = int(os.environ.get("FPS_MAX_FRAMES", 768))
+print(f"recovlm FPS_MAX_FRAMES: {FPS_MAX_FRAMES}")
+
 FAST_TOKEN_RATIO = 0.5
 VIDEO_MAX_TOKENS = 768
 SLOW_FAST_FRAMES_RATIO = 0.8
@@ -89,6 +93,7 @@ def smart_resize(
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = ceil_by_factor(height * beta, factor)
         w_bar = ceil_by_factor(width * beta, factor)
+    print(f'{height=} {width=} {factor=} {min_pixels=} {max_pixels=} {h_bar=} {w_bar=}')
     return h_bar, w_bar
 
 
@@ -267,7 +272,7 @@ def _read_video_decord(
     if 'video_start' in ele or 'video_end' in ele:
         raise NotImplementedError("not support start_pts and end_pts in decord for now.")
     total_frames, video_fps = len(vr), vr.get_avg_fps()
-    logger.info(
+    print(
         f"decord:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
     idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
@@ -719,8 +724,21 @@ def get_rope_index(
                 llm_pos_ids_list.append(torch.arange(
                     text_len).view(1, -1).expand(3, -1) + st_idx)
 
-                t_index = torch.arange(llm_grid_t).view(-1,
-                                                        1).expand(-1, llm_grid_h * llm_grid_w).flatten()
+
+                # hjm dbg
+                range_tensor = torch.arange(llm_grid_t).view(-1, 1)
+                expanded_range = range_tensor.expand(-1, llm_grid_h * llm_grid_w)
+
+                _second_per_grid_t = 1
+                _tokens_per_second = 2
+                time_tensor = expanded_range * _second_per_grid_t * _tokens_per_second
+
+                time_tensor_long = time_tensor.long()
+                t_index = time_tensor_long.flatten()
+                # dbg end
+
+                #t_index = torch.arange(llm_grid_t).view(-1,
+                #                                        1).expand(-1, llm_grid_h * llm_grid_w).flatten()
                 h_index = torch.arange(llm_grid_h).view(
                     1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
                 w_index = torch.arange(llm_grid_w).view(

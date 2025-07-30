@@ -35,6 +35,7 @@ from sglang.srt.managers.tokenizer_manager import (
     ResumeMemoryOccupationReqInput,
     UpdateWeightsFromTensorReqInput,
     PostLoadWeightsFromTensorReqInput,
+    DumpWeightsReqInput,
 )
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
@@ -187,6 +188,19 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
     async def post_load_weights_from_tensor(self, flush_cache : Optional[bool] = True):
         obj = PostLoadWeightsFromTensorReqInput(flush_cache=flush_cache)
         return await self.tokenizer_manager.post_load_weights_from_tensor(obj)
+
+    async def dump_weights(self,
+                           output_path: str,
+                           dump_mode: Optional[str] = "custom",
+                           layers: Optional[Union[str, List[str]]] = "all",
+                           format: Optional[str] = "pth"):
+        obj = DumpWeightsReqInput(
+            output_path=output_path,
+            dump_mode=dump_mode,
+            layers=layers,
+            format=format,
+            )
+        return await self.tokenizer_manager.dump_weights(obj)
 
 
 # NOTE(sgm): add for verl. We can optimize it by making

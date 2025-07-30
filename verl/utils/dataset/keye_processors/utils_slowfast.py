@@ -31,27 +31,35 @@ import cv2
 
 logger = logging.getLogger(__name__)
 
-IMAGE_FACTOR = 28
 # min tokens per image
 MIN_TOKENS = 4
 # max tokens per image
 MAX_TOKENS = 20480
-MIN_PIXELS = MIN_TOKENS * IMAGE_FACTOR * IMAGE_FACTOR # 4 * 28 * 28 = 3,136
-MAX_PIXELS = MAX_TOKENS * IMAGE_FACTOR * IMAGE_FACTOR # 20480 * 28 * 28 = 16,056,320
+
+IMAGE_FACTOR = int(os.environ.get("KEYE_IMAGE_FACTOR", 28))
+MIN_PIXELS = int(os.environ.get("MIN_PIXELS", 4 * IMAGE_FACTOR * IMAGE_FACTOR))
+MAX_PIXELS = int(os.environ.get("MAX_PIXELS", 16384 * IMAGE_FACTOR * IMAGE_FACTOR))
+print(f"recovlm IMAGE_FACTOR: {IMAGE_FACTOR} {MIN_PIXELS=} {MAX_PIXELS=}")
+
 MAX_RATIO = 200
 
 # min tokens per video frame
 VIDEO_MIN_TOKENS = 48
 # max tokens per video frame
 VIDEO_MAX_TOKENS = 768
-# min pixels per video frame
-VIDEO_MIN_PIXELS = VIDEO_MIN_TOKENS * IMAGE_FACTOR * IMAGE_FACTOR # 32 * 28 * 28 = 25,088
-# max pixels per video frame
-VIDEO_MAX_PIXELS = VIDEO_MAX_TOKENS * IMAGE_FACTOR * IMAGE_FACTOR # 768 * 28 * 28 = 602,112
-# max total pixels per video
-VIDEO_TOTAL_PIXELS = 65536 * IMAGE_FACTOR * IMAGE_FACTOR # 65,536 * 28 * 28 = 51,380,224
-# default fps
+
+VIDEO_MIN_PIXELS = 128 * 28 * 28
+VIDEO_MAX_PIXELS = 768 * 28 * 28
+VIDEO_TOTAL_PIXELS = int(os.environ.get("VIDEO_TOTAL_PIXELS", 24576 * 28 * 28))
+print(f"recovlm VIDEO_TOTAL_PIXELS: {VIDEO_TOTAL_PIXELS}")
+# VIDEO_TOTAL_PIXELS = 24576 * 28 * 28
+
+FRAME_FACTOR = 2
 FPS = 2.0
+FPS_MIN_FRAMES = 4
+FPS_MAX_FRAMES = int(os.environ.get("FPS_MAX_FRAMES", 768))
+print(f"recovlm FPS_MAX_FRAMES: {FPS_MAX_FRAMES}")
+
 
 FAST_TOKEN_RATIO = 0.3
 

@@ -132,7 +132,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         def is_reach_max_packed_usage(packed_name_tensor, free_mem):
             size = sum([t.numel() * t.element_size() for _, t in packed_name_tensor])
             # mcore : 1; sglang: 1 (deserialize) + 1 (broadcast)
-            total_size = size * 2 / (1024**3)
+            total_size = size * 5 / (1024**3)
             return  total_size > free_mem
 
         timing = {}
@@ -155,7 +155,8 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                     continue
                 cur_time = time.time()
                 name = ",".join([n for (n, _) in packed_name_tensor])
-                name = calculate_string_md5(name)
+                if "," in name:
+                    name = calculate_string_md5(name)
                 timing[f'generate_weight_{name}'] = cur_time - start_time
                 timing[f'packed_tensor_size_{name}'] = sum([t.numel() * t.element_size() for _, t in packed_name_tensor]) / (1024**3)
                 timing[f'max_mem_allocated_gb_{name}'] = get_torch_device().max_memory_allocated() / (1024**3) 
@@ -180,7 +181,8 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                 if len(packed_name_tensor) != 0:
                     cur_time = time.time()
                     name = ",".join([n for (n, _) in packed_name_tensor])
-                    name = calculate_string_md5(name)
+                    if "," in name:
+                        name = calculate_string_md5(name)
                     timing[f'generate_weight_{name}'] = cur_time - start_time
                     timing[f'packed_tensor_size_{name}'] = sum([t.numel() * t.element_size() for _, t in packed_name_tensor]) / (1024**3)
                     timing[f'max_mem_allocated_gb_{name}'] = get_torch_device().max_memory_allocated() / (1024**3) 
@@ -206,18 +208,22 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                 if self.device_mesh["tp"].get_local_rank() == 0:
                     await self.inference_engine.post_load_weights_from_tensor()
 
+
+
         if not hasattr(self, '_first_call_update_weights') or not self._first_call_update_weights:
             self._first_call_update_weights = True
-
-            if self.device_mesh.get_rank() == 0:
-                import pickle
-                from datetime import datetime
-                now = datetime.now()
-                formatted_date_time = now.strftime("%Y-%m-%d_%H_%M_%S")
-                dump_file = os.path.dirname(os.path.abspath(__file__)) + f"/cost_{formatted_date_time}.pkl"
-                with open(dump_file, 'wb') as f:
-                    pickle.dump(timing, f) 
-                    print(f'update_weights_from_tensor perf file: {dump_file} has dumped')
+            if self.rollout_config.get("debug_dump_sglang_tensor", None):
+                if self.device_mesh.get_rank() == 0:
+                    import pickle
+                    from datetime import datetime
+                    now = datetime.now()
+                    formatted_date_time = now.strftime("%Y-%m-%d_%H_%M_%S")
+                    dump_file = os.path.dirname(os.path.abspath(__file__)) + f"/cost_{formatted_date_time}.pkl"
+                    dump_pth_file = os.path.dirname(os.path.abspath(__file__)) + f"/dumped_tensor_{formatted_date_time}/"
+                    await self.inference_engine.dump_weights(output_path=dump_pth_file)
+                    with open(dump_file, 'wb') as f:
+                        pickle.dump(timing, f) 
+                        print(f'update_weights_from_tensor perf file: {dump_file} has dumped')
 
             
     async def release_memory(self):

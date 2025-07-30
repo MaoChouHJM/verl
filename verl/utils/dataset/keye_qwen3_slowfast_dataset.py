@@ -76,7 +76,7 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         assert self.use_slow_fast is not None
         assert base_model_dir is not None
         self.config = config
-        self.hf_config = AutoConfig.from_pretrained(base_model_dir)
+        self.hf_config = AutoConfig.from_pretrained(base_model_dir, trust_remote_code=True)
         
         if self.use_slow_fast:
             from .keye_processors.utils_slowfast import process_vision_info, get_rope_index_slowfast
@@ -88,14 +88,13 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
             self.get_rope_index_func = get_rope_index
 
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
-        self.prompt_key = config.get("prompt_key", "messages")
+        self.prompt_key = config.get("prompt_key", "conversations")
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
         self.max_prompt_length = config.get("max_prompt_length", 5*1024)
 
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.truncation = config.get("truncation", "error")
-        self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count())
@@ -114,31 +113,6 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
 
         print(f"dataset len: {len(self.dataframe)}")
 
-        # filter out too long prompts
-        if self.filter_overlong_prompts:
-            tokenizer = self.tokenizer
-            prompt_key = self.prompt_key
-            self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
-                <= self.max_prompt_length,
-                num_proc=self.num_workers,
-                desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
-            )
-
-            print(f"filter dataset len: {len(self.dataframe)}")
-
-        #if self.filter_overlong_prompts:
-        #    tokenizer = self.tokenizer
-        #    prompt_key = self.prompt_key
-        #    self.dataframe = self.dataframe.filter(
-        #        lambda doc: self.image_key in doc,
-        #        num_proc=self.num_workers,
-        #        desc=f"Filtering prompts have {self.image_key}",
-        #    )
-
-        #    print(f"filter dataset len: {len(self.dataframe)}")
-
-
     def resume_dataset_state(self):
         self.serialize_dataset = not hasattr(self, "original_data_files")
         # resume dataframe if not it's serialized in data.pt
@@ -152,7 +126,19 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
-        messages: list = example.pop(self.prompt_key)
+        if "messages" in example:
+            messages: list = example.pop("messages")
+        elif "conversations" in example:
+            messages: list = example.pop("conversations")
+        else:
+            raise ValueError(f'"messages" or "conversations" must be in the example.')
+
+        def remove_response(messages) -> Optional[str]:
+            last_role = messages[-1]['role'] if messages else None
+            if last_role == 'assistant':
+                return messages.pop()['content']
+
+        remove_response(messages)
 
         if (self.image_key in example and example[self.image_key] != None) or (self.video_key in example and example[self.video_key] != None):
             image_idx = 0
@@ -177,16 +163,13 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
                 for message in messages:
                     role = message["role"]
                     if role == "user":
-                        if self.image_key in example:
-                            try:
-                                for idx, image_path in enumerate(example[self.image_key]):
-                                    message["content"].insert(0+ idx, {"type": "image", "image": image_path})
-                            except Exception as e:
-                                raise ValueError(f'{example=}')
+                        if self.image_key in example and example[self.image_key] is not None:
+                            for idx, image_path in enumerate(example[self.image_key]):
+                                message["content"].insert(0 + idx, {"type": "image", "image": image_path})
 
-                        if self.video_key in example:
+                        if self.video_key in example and example[self.video_key] is not None:
                             for idx, video_path in enumerate(example[self.video_key]):
-                                message["content"].insert(0+ idx, {"type": "video", "video": video_path})
+                                message["content"].insert(0 + idx, {"type": "video", "video": video_path})
         return messages
 
     def __getitem__(self, item):
@@ -194,7 +177,13 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
         row_dict: dict = self.dataframe[item]
-        origin_messages = copy.deepcopy(row_dict.get("messages", []))
+        # origin_messages can be  "conversations" or "messages"
+        if "messages" in row_dict:
+            origin_messages = copy.deepcopy(row_dict["messages"])
+        elif "conversations" in row_dict:
+            origin_messages = copy.deepcopy(row_dict["conversations"])
+        else:
+            raise ValueError(f'"messages" or "conversations" must be in the sample.')
 
         messages = self._build_messages(row_dict)
         row_dict["messages"] = origin_messages
@@ -203,20 +192,20 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         multi_modal_data = {}
 
-        images = None
-        videos = None
-
         images, videos = self.process_vision_info_func(messages)
 
+        if videos is not None:
+            torch.save(videos, "/nlp_group/huangjiaming/logits-distill/videos.pkl")
+
         if self.image_key in row_dict and row_dict[self.image_key] != None:
-            #images = [process_image(image) for image in row_dict.pop(self.image_key)]
             multi_modal_data["image"] = images
 
         if self.video_key in row_dict and row_dict[self.video_key] != None:
-            #videos = [process_video(video) for video in row_dict.pop(self.video_key)]
-            multi_modal_data["video"] = [video.numpy() for video in videos]
+            multi_modal_data["video"] = videos
 
         model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
+        if hasattr(model_inputs, 'image_grid_thw'):
+            print(f'{model_inputs.image_grid_thw=}', flush=True)
 
         input_ids = model_inputs.pop("input_ids")
         attention_mask = model_inputs.pop("attention_mask")
@@ -228,8 +217,6 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         row_dict["multi_modal_data"] = multi_modal_data
         row_dict["multi_modal_inputs"] = dict(model_inputs)
 
-        #assert "pixel_values" in row_dict["multi_modal_inputs"], f"{raw_prompt=} {images=}"
-
         # second_per_grid_ts isn't used for training, just for mrope
         row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
@@ -238,7 +225,7 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
                     input_ids=input_ids,
                     image_grid_thw=model_inputs.get("image_grid_thw"),
                     video_grid_thw=model_inputs.get("video_grid_thw"),
-                    spatial_merge_size=self.hf_config.spatial_merge_size,
+                    spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
                     image_token_id=self.hf_config.image_token_id,
                     video_token_id=self.hf_config.video_token_id,
                     vision_start_token_id=self.hf_config.vision_start_token_id,
@@ -249,7 +236,7 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
                     input_ids=input_ids,
                     image_grid_thw=model_inputs.get("image_grid_thw"),
                     video_grid_thw=model_inputs.get("video_grid_thw"),
-                    spatial_merge_size=self.hf_config.spatial_merge_size,
+                    spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
                     image_token_id=self.hf_config.image_token_id,
                     video_token_id=self.hf_config.video_token_id,
                     vision_start_token_id=self.hf_config.vision_start_token_id

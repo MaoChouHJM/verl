@@ -42,7 +42,7 @@ from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, get_polic
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
-from verl.utils.megatron_utils import get_model_config
+from verl.utils.megatron_utils import get_model_config, unwrap_model
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.profiler.profile import Profiler
 from verl.utils.py_functional import append_to_dict
@@ -304,6 +304,131 @@ class MegatronPPOActor(BasePPOActor):
             dataloader_kwargs={"shuffle": self.config.shuffle},
         )
 
+    def debug_forward_batch(
+        self,
+        forward_only=True,
+        post_process_fn=None,
+        calculate_entropy=False,
+        use_dynamic_bsz=False,
+        micro_batch_size=None,
+        max_token_len=None,
+        mini_batch_size=None,
+    ):
+        """
+        We assume:
+        - The model takes input: (input_ids, attention_mask, position_ids). No rmpad for the input
+        - The communication shape is (total_nnz_pad_to_sp // tp_size, 1, hidden_size) if sequence parallel is enabled
+        """
+        forward_backward_func = get_forward_backward_func()
+
+        def loss_func(loss_mask: torch.Tensor,
+                      output_tensor: torch.Tensor,
+                      ):
+            losses = output_tensor.view(-1).float()
+            loss_mask = loss_mask.view(-1).float()
+            loss_mask = loss_mask[1:]
+            losses = losses[:-1] 
+        
+            # Actually, we don't need loss_mask and the shifts above because it should satisfy loss_mask = torch.nonzero(losses). 
+            # This loss is already masked because we have already configured ignore_index when computing the labels (check sequence_packing.py).
+            loss = torch.sum(losses * loss_mask)
+            num_tokens = loss_mask.sum().clone().detach().to(torch.int)
+            reporting_loss = torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])
+            
+            return (loss, num_tokens, {'lm_loss': reporting_loss})
+
+        def forward_step(batch_iter, model):
+            from megatron.core.packed_seq_params import PackedSeqParams
+
+            batch = next(batch_iter)
+
+            packed_seq_params = PackedSeqParams(
+                qkv_format="thd",
+                cu_seqlens_q=batch["cu_seqlens"],
+                cu_seqlens_kv=batch["cu_seqlens"],
+                max_seqlen_q=batch["max_seqlen"],
+                max_seqlen_kv=batch["max_seqlen"],
+            )
+            vision_packed_seq_params = None
+            fast_vision_packed_seq_params = None
+
+            unwrapped_model = unwrap_model(model)
+            vp_stage = getattr(unwrapped_model, 'vp_stage', None)
+
+            if mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=vp_stage):
+                if vp_stage is None or vp_stage == 0:
+                    vision_packed_seq_params = PackedSeqParams(
+                        qkv_format="thd",
+                        cu_seqlens_q=batch["vision_cu_seqlens"],
+                        cu_seqlens_kv=batch["vision_cu_seqlens"],
+                        max_seqlen_q=batch["vision_max_seqlen"],
+                        max_seqlen_kv=batch["vision_max_seqlen"],
+                    )
+                    fast_vision_packed_seq_params = PackedSeqParams(
+                        qkv_format="thd",
+                        cu_seqlens_q=batch.get("fast_vision_cu_seqlens", None),
+                        cu_seqlens_kv=batch.get("fast_vision_cu_seqlens", None),
+                        max_seqlen_q=batch.get("fast_vision_max_seqlen", None),
+                        max_seqlen_kv=batch.get("fast_vision_max_seqlen", None),
+                    )
+
+            output_tensor = model(
+                input_ids=batch.get("input_ids", None),
+                position_ids=batch.get("position_ids", None),
+                attention_mask=batch.get("attention_mask", None),
+                labels=batch.get("labels", None),
+                packed_seq_params=packed_seq_params,
+                vision_data=batch.get("vision_data", None),
+                vision_position_ids=batch.get("vision_position_ids", None),
+                vision_grid_thw=batch.get("vision_grid_thw", None),
+                vision_packed_seq_params=vision_packed_seq_params,
+                vision_mask_index=batch.get("vision_mask_index", None),
+                fast_vision_data=batch.get("fast_vision_data", None),
+                fast_vision_position_ids=batch.get("fast_vision_position_ids", None),
+                fast_vision_grid_thw=batch.get("fast_vision_grid_thw", None),
+                fast_vision_packed_seq_params=fast_vision_packed_seq_params,
+                fast_vision_mask_index=batch.get("fast_vision_mask_index", None),
+                loss_mask=batch.get("loss_mask", None),
+            )
+
+            dp_rank = mpu.get_data_parallel_rank()
+            torch.save(output_tensor, f'/nlp_group/huangjiaming/logits-distill/verl_logits_rank_{dp_rank}.pth')
+
+            return output_tensor, partial(loss_func, batch.get("loss_mask", None))
+
+        def debug_batch_generator():
+            dp_rank = mpu.get_data_parallel_rank()
+            batch_path = f"/llm_reco/nasen/kai-megatron/batches/input_0_dp{dp_rank}.pth"
+            return iter([torch.load(batch_path, map_location=torch.device("cuda"))])
+
+
+        # TODO: we may use the new schedule instead
+        # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
+        if mpu.get_pipeline_model_parallel_world_size() > 1:
+            losses_reduced = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=debug_batch_generator(),
+                model=self.actor_module,
+                num_microbatches=1,
+                seq_length=2000,  # no use when input_shapes was set
+                micro_batch_size=1,  # no use when input_shapes was set
+                forward_only=forward_only,
+            )
+        else:
+            losses_reduced = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=debug_batch_generator(),
+                model=self.actor_module,
+                num_microbatches=1,
+                seq_length=2000,  # in use for pp = 1
+                micro_batch_size=1,  # in use for pp = 1
+                forward_only=forward_only,
+            )
+        # loss_reduces contains the stats returned from loss_func
+
+        return losses_reduced
+
+
     def forward_backward_batch(
         self,
         data: DataProto,
@@ -539,7 +664,6 @@ class MegatronPPOActor(BasePPOActor):
 
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
-
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
         if mpu.get_pipeline_model_parallel_world_size() > 1:

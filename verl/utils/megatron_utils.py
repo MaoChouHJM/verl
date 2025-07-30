@@ -66,13 +66,13 @@ def get_model(
             if os.environ["MEGATRON_EA_VERSION"].lower() == "true":
                 pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=i)
                 post_process = mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=i)
+                this_model = model_provider_func(pre_process=pre_process, post_process=post_process, vp_stage=i)
                 this_model.vp_stage = i
             else:
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
                 pre_process = mpu.is_pipeline_first_stage()
                 post_process = mpu.is_pipeline_last_stage()
-            this_model = model_provider_func(pre_process=pre_process, post_process=post_process, vp_stage=i)
-            #this_model = model_provider_func(pre_process=pre_process, post_process=post_process)
+                this_model = model_provider_func(pre_process=pre_process, post_process=post_process)
             this_model.model_type = model_type
             model.append(this_model)
     else:

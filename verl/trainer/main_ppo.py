@@ -64,6 +64,13 @@ def run_ppo(config) -> None:
             "TIMESTAMP": os.environ.get("TIMESTAMP", 'null'),
             "MONDB_PROJECT_NAME": os.environ.get("MONDB_PROJECT_NAME", 'none'),
             "MEGATRON_EA_VERSION": str(mcore_ea_version),
+            "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "1",
+            "NVTE_FUSED_ATTN": "1",
+            "NVTE_FWD_LAYERNORM_SM_MARGIN": "8",
+            "NVTE_BWD_LAYERNORM_SM_MARGIN": "8",
+            "NVTE_NORM_FWD_USE_CUDNN": "1",
+            "NVTE_NORM_BWD_USE_CUDNN": "1",
+            "NVTE_EXT_MARGIN_SM": "20",
         }
         
         if user_custom_env:
@@ -120,7 +127,7 @@ class TaskRunner:
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
-        if self.config.actor_rollout_ref.model.get("custom_chat_template", None) is not None:
+        if config.actor_rollout_ref.model.get("custom_chat_template", None) is not None:
             print(f'{self.config.model.custom_chat_template=}')
             if self.processor is not None:
                 self.processor.chat_template = self.config.model.custom_chat_template

@@ -275,9 +275,16 @@ def hf_to_mcore_config_dpskv3(
     }
     if "rope_scaling" in hf_config and hf_config.rope_scaling is not None:
         mla_rope_config.update(hf_config.rope_scaling)
-    #moe_layer_freq = [1] * hf_config.num_hidden_layers
-    #for i in range(min(hf_config.first_k_dense_replace, hf_config.num_hidden_layers)):
-    #    moe_layer_freq[i] = 0
+    # support convert_hf_to_mcore.py which doesnt have override_transformer_config
+    if override_transformer_config_kwargs == {}:
+        print(f'running here')
+        moe_layer_freq = [1] * hf_config.num_hidden_layers
+        for i in range(min(hf_config.first_k_dense_replace, hf_config.num_hidden_layers)):
+            moe_layer_freq[i] = 0
+        override_transformer_config_kwargs.update({"moe_layer_freq": moe_layer_freq})
+        override_transformer_config_kwargs.update({"moe_token_dispatcher_type": "alltoall"})
+    else:
+        override_transformer_config_kwargs.update({"moe_token_dispatcher_type": "flex"})
 
     # disable MTP and quantization for now
     if "num_nextn_predict_layers" in hf_config:
@@ -295,7 +302,7 @@ def hf_to_mcore_config_dpskv3(
         qk_layernorm=True,
         # Standard MoE parameters
         moe_ffn_hidden_size=hf_config.moe_intermediate_size,
-        moe_token_dispatcher_type="flex",
+        #moe_token_dispatcher_type=override_transformer_config_kwargs.get("moe_token_dispatcher_type", "flex"),
         moe_router_bias_update_rate=0.001,
         moe_router_enable_expert_bias=True,
         moe_router_topk=hf_config.num_experts_per_tok,
@@ -464,8 +471,16 @@ def hf_to_mcore_config_keye_qwen3_slowfast(
         mrope_section=hf_config.rope_scaling["mrope_section"],
         # keye
         qk_layernorm=True,
+        gradient_accumulation_fusion=True,
+        async_tensor_model_parallel_allreduce=True,
+        cross_entropy_loss_fusion=True,
+        cross_entropy_fusion_impl='te',
+        attention_softmax_in_fp32=False,
+        bias_activation_fusion=True,
+        persist_layer_norm=True,
+        bias_dropout_fusion=True,
         recompute_granularity="selective",
-        recompute_modules=["core_attn", "mlp", "layernorm"],
+        recompute_modules=["core_attn", "mlp"],
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)

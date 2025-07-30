@@ -71,7 +71,7 @@ class SupportedModel(Enum):
     LLAMA4 = "Llama4ForConditionalGeneration"  # not tested
     QWEN3 = "Qwen3ForCausalLM"  # tested
     QWEN3_MOE = "Qwen3MoeForCausalLM"  # not tested
-    KEYE_QWEN3_SLOWFAST = "KeyeForConditionalGeneration" # tested
+    KEYE = "KeyeForConditionalGeneration" # not tested
 
 
 # Registry for model configuration converters

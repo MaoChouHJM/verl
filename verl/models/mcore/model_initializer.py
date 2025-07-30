@@ -26,6 +26,7 @@ from pandas._libs.lib import fast_multiget
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec, get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
+from megatron.core.transformer import MegatronModule, TransformerConfig, ModuleSpec
 from verl.models.mcore.qwen2_5_vl import vision_config
 from verl.utils.logger import print_rank_0
 
@@ -328,15 +329,11 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
     ):
         tfconfig = self.tfconfig
         transformer_layer_spec = self.get_transformer_layer_spec(
-            tfconfig,
-            use_transformer_engine=True,
-            normalization="RMSNorm",
-            qk_l2_norm=False,
-            vp_stage=vp_stage
+            vp_stage
         )
-        from .keye import KeyeModelSlowFast
-        from .keye import get_vision_model_config
-        from .keye.keye_layer_specs import get_vision_model_spec
+        from megatron.core.models.keye.keye_model_slowfast import KeyeModelSlowFast, SiglipVisionModel, Projector
+        from megatron.core.models.keye.keye_config import get_vision_model_config, VisionTransformerConfig
+        from megatron.core.models.keye.keye_layer_specs import get_vision_model_spec
 
         vision_config = get_vision_model_config(None, tfconfig) # not use args in get_vision_model_config, set it None
         vision_transformer_layer_spec = get_vision_model_spec()
@@ -346,8 +343,59 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
             mtp_block_spec = get_gpt_mtp_block_spec(tfconfig, transformer_layer_spec, use_transformer_engine=True)
 
         print_rank_0(f"in KeyeQwen3SlowFastModel initialize\n\ntransformer_config={tfconfig}\n\nvision_config={vision_config}")
+
+        def monkey_patch_init(
+            self,
+            transformer_config: TransformerConfig,
+            hf_config: PretrainedConfig,
+            transformer_layer_spec: ModuleSpec,
+            vision_config: VisionTransformerConfig,
+            fast_vision_config: VisionTransformerConfig,
+            vision_layer_spec: ModuleSpec,
+            fast_vision_layer_spec: ModuleSpec,
+            pre_process: bool = True,
+            post_process: bool = True,
+            mtp_block_spec: Optional[ModuleSpec] = None,
+            vp_stage: Optional[int] = None,
+        ):
+           super(KeyeModelSlowFast, self).__init__(config=transformer_config)
+           self.config = transformer_config
+           self.vision_config = vision_config
+           self.pre_process = pre_process
+           self.post_process = post_process
+           self.vp_stage = vp_stage
+           if self.pre_process:
+               self.visual = SiglipVisionModel(vision_config, vision_layer_spec, vp_stage)
+               self.mlp_AR = Projector(vision_config, transformer_config.hidden_size)
+
+               # self.fast_visual = SiglipVisionModel(fast_vision_config, fast_vision_layer_spec, vp_stage)
+               # self.fast_mlp_AR = Projector(fast_vision_config, transformer_config.hidden_size)
+
+           self.language_model = GPTModel(
+               config=transformer_config,
+               transformer_layer_spec=transformer_layer_spec,
+               vocab_size=hf_config.vocab_size,
+               #vocab_size=155136, # only for test
+               #max_sequence_length=hf_config.max_position_embeddings,
+               max_sequence_length=327680, # can remove
+               pre_process=pre_process,
+               post_process=post_process,
+               parallel_output=True,
+               position_embedding_type="mrope",
+               rotary_base=hf_config.rope_theta,
+               #rotary_base=10000, # only for test
+               rope_scaling=False,
+               mtp_block_spec=mtp_block_spec,
+               vp_stage=vp_stage,
+           )
+           self.share_embeddings_and_output_weights = (
+               self.language_model.share_embeddings_and_output_weights
+           )
+        KeyeModelSlowFast.__init__ = monkey_patch_init
+
         keye_model = KeyeModelSlowFast(
         transformer_config=tfconfig,
+        hf_config=self.hf_config,
         transformer_layer_spec=transformer_layer_spec,
         vision_config=vision_config,
         vision_layer_spec=vision_transformer_layer_spec,
@@ -358,5 +406,6 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
         mtp_block_spec=mtp_block_spec,
         vp_stage=vp_stage,
         )
+        print_rank_0(f'initialized\n\n{keye_model=}')
 
         return keye_model

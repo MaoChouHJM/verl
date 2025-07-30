@@ -218,7 +218,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                     use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
                 )
 
-        if self._is_actor and self._is_rollout:
+        if self._is_actor or self._is_rollout:
             actor_module = make_model(wrap_with_ddp=True)
             print(f"actor_module: {len(actor_module)}")
             if self.config.actor.load_weight:
@@ -635,6 +635,29 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             log_gpu_memory_usage("After offload actor params and grad during compute_log_prob", logger=logger)
         get_torch_device().empty_cache()
         return output
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @GPUMemoryLogger(role="debug_compute_log_prob", logger=logger)
+    @DistProfiler.annotate(color="blue")
+    def debug_compute_log_prob(self):
+        assert self._is_actor
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
+            log_gpu_memory_usage("After load actor params and grad during compute_log_prob", logger=logger)
+        losses_reduced = self.actor.debug_forward_batch()
+        print(f'{mpu.get_data_parallel_rank()=} {losses_reduced=}', flush=True)
+        torch.distributed.barrier()
+        output = DataProto.from_dict(
+            tensors={"losses": losses_reduced},
+        )
+        output = output.to("cpu")
+        # clear kv cache
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+            log_gpu_memory_usage("After offload actor params and grad during compute_log_prob", logger=logger)
+        get_torch_device().empty_cache()
+        return output
+
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, checkpoint_path, hdfs_path=None, del_local_after_load=True):
