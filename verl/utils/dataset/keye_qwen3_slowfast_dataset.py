@@ -69,29 +69,22 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         self.original_data_files = copy.deepcopy(data_files)  # use for resume
         self.tokenizer = tokenizer
         self.processor = processor
-        self.use_slow_fast = config.get("use_slow_fast", None)
         base_model_dir = config.get("base_model_dir", None)
         assert self.tokenizer is not None
         assert self.processor is not None
-        assert self.use_slow_fast is not None
         assert base_model_dir is not None
         self.config = config
         self.hf_config = AutoConfig.from_pretrained(base_model_dir, trust_remote_code=True)
         
-        if self.use_slow_fast:
-            from .keye_processors.utils_slowfast import process_vision_info, get_rope_index_slowfast
-            self.process_vision_info_func = process_vision_info
-            self.get_rope_index_func = get_rope_index_slowfast
-        else:
-            from .keye_processors.utils import process_vision_info, get_rope_index
-            self.process_vision_info_func = process_vision_info
-            self.get_rope_index_func = get_rope_index
+        from examples.keye.processors.utils_slowfast import get_rope_index_slowfast, process_vision_info
+        self.process_vision_info_func = process_vision_info
+        self.get_rope_index_func = get_rope_index_slowfast
 
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "conversations")
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
-        self.max_prompt_length = config.get("max_prompt_length", 5*1024)
+        self.max_prompt_length = config.get("max_prompt_length", 8*1024)
 
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.truncation = config.get("truncation", "error")
@@ -194,8 +187,8 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
 
         images, videos = self.process_vision_info_func(messages)
 
-        if videos is not None:
-            torch.save(videos, "/nlp_group/huangjiaming/logits-distill/videos.pkl")
+        #if videos is not None:
+        #    torch.save(videos, "/nlp_group/huangjiaming/logits-distill/videos.pkl")
 
         if self.image_key in row_dict and row_dict[self.image_key] != None:
             multi_modal_data["image"] = images
@@ -204,8 +197,8 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
             multi_modal_data["video"] = videos
 
         model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
-        if hasattr(model_inputs, 'image_grid_thw'):
-            print(f'{model_inputs.image_grid_thw=}', flush=True)
+        #if hasattr(model_inputs, 'image_grid_thw'):
+        #    print(f'{model_inputs.image_grid_thw=}', flush=True)
 
         input_ids = model_inputs.pop("input_ids")
         attention_mask = model_inputs.pop("attention_mask")
@@ -220,27 +213,16 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         # second_per_grid_ts isn't used for training, just for mrope
         row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
-        if self.use_slow_fast:
-            position_ids = self.get_rope_index_func(
-                    input_ids=input_ids,
-                    image_grid_thw=model_inputs.get("image_grid_thw"),
-                    video_grid_thw=model_inputs.get("video_grid_thw"),
-                    spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
-                    image_token_id=self.hf_config.image_token_id,
-                    video_token_id=self.hf_config.video_token_id,
-                    vision_start_token_id=self.hf_config.vision_start_token_id,
-                    fast_video_token_id=self.hf_config.fast_video_token_id
-                ).transpose(0,1)  # (bs, 3, seq_len)
-        else:
-            position_ids = self.get_rope_index_func(
-                    input_ids=input_ids,
-                    image_grid_thw=model_inputs.get("image_grid_thw"),
-                    video_grid_thw=model_inputs.get("video_grid_thw"),
-                    spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
-                    image_token_id=self.hf_config.image_token_id,
-                    video_token_id=self.hf_config.video_token_id,
-                    vision_start_token_id=self.hf_config.vision_start_token_id
-                ).transpose(0,1)  # (bs, 3, seq_len)
+        position_ids = self.get_rope_index_func(
+                input_ids=input_ids,
+                image_grid_thw=model_inputs.get("image_grid_thw"),
+                video_grid_thw=model_inputs.get("video_grid_thw"),
+                spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+                image_token_id=self.hf_config.image_token_id,
+                video_token_id=self.hf_config.video_token_id,
+                vision_start_token_id=self.hf_config.vision_start_token_id,
+                fast_video_token_id=self.hf_config.fast_video_token_id
+            ).transpose(0,1)  # (bs, 3, seq_len)
 
         input_ids, attention_mask, position_ids = verl_F.postprocess_data(
             input_ids=input_ids,
