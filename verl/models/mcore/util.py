@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+import torch
 from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
@@ -401,7 +402,7 @@ def keye_slowfast_preprocess_packed_seq(
     position_ids: Optional[torch.Tensor],
     attention_mask: torch.Tensor,  # [bs, prompt_length + response_length]
     multi_modal_inputs: Dict[str, torch.Tensor],
-    slowfast_padder: SlowFastVisionPadder,
+    slowfast_padder: Optional[SlowFastVisionPadder] = None,
     pre_process: bool = True,
     image_token_id: int = 151655,
     video_token_id: int = 151656,
@@ -435,32 +436,33 @@ def keye_slowfast_preprocess_packed_seq(
             fast_packed_vision_grid_thw.append(multi_modal_inputs["fast_video_grid_thw"])
 
         # padding to trigger VIT
-        vit_paddings = slowfast_padder(packed_vision_data, [], fast_packed_vision_data)
-        for pad in vit_paddings:
-            all_one_attention_mask = torch.ones_like(pad['input_ids'])
-            pad['input_ids'], _ = rmpad_and_cp_padding(pad['input_ids'], all_one_attention_mask,
-                                    pre_process, dbg_cp_size=dbg_cp_size)
-            pad['position_ids'], _ = rmpad_and_cp_padding(pad['position_ids'].transpose(0, 1), all_one_attention_mask,
-                                    pre_process, dbg_cp_size=dbg_cp_size)
+        if slowfast_padder is not None:
+            vit_paddings = slowfast_padder(packed_vision_data, [], fast_packed_vision_data)
+            for pad in vit_paddings:
+                all_one_attention_mask = torch.ones_like(pad['input_ids'])
+                pad['input_ids'], _ = rmpad_and_cp_padding(pad['input_ids'], all_one_attention_mask,
+                                        pre_process, dbg_cp_size=dbg_cp_size)
+                pad['position_ids'], _ = rmpad_and_cp_padding(pad['position_ids'].transpose(0, 1), all_one_attention_mask,
+                                        pre_process, dbg_cp_size=dbg_cp_size)
 
-            packed_input_ids.append(pad['input_ids'])
-            packed_position_ids.append(pad['position_ids'])
-            try:
-                cu_seqlens = torch.cat([cu_seqlens,
-                    (cu_seqlens[-1] + len(pad['input_ids'][0])).unsqueeze(0)])
-            except Exception as e:
-                raise RuntimeError(f'{cu_seqlens=}\n{cu_seqlens.shape=}\n{e=}')
-            if cp_size > 1 and cu_seqlens[-1] % (2 * cp_size) != 0:
-                raise RuntimeError(f"cu_seqlens={cu_seqlens}")
-            if "pixel_values" in pad and len(pad["pixel_values"]):
-                packed_vision_data.append(pad["pixel_values"])
-                packed_vision_grid_thw.append(pad["image_grid_thw"])
-            if "pixel_values_videos" in pad:
-                packed_vision_data.append(pad["pixel_values_videos"])
-                packed_vision_grid_thw.append(pad["video_grid_thw"])
-            if 'fast_pixel_values_videos' in pad:
-                fast_packed_vision_data.append(pad["fast_pixel_values_videos"])
-                fast_packed_vision_grid_thw.append(pad["fast_video_grid_thw"])
+                packed_input_ids.append(pad['input_ids'])
+                packed_position_ids.append(pad['position_ids'])
+                try:
+                    cu_seqlens = torch.cat([cu_seqlens,
+                        (cu_seqlens[-1] + len(pad['input_ids'][0])).unsqueeze(0)])
+                except Exception as e:
+                    raise RuntimeError(f'{cu_seqlens=}\n{cu_seqlens.shape=}\n{e=}')
+                if cp_size > 1 and cu_seqlens[-1] % (2 * cp_size) != 0:
+                    raise RuntimeError(f"cu_seqlens={cu_seqlens}")
+                if "pixel_values" in pad and len(pad["pixel_values"]):
+                    packed_vision_data.append(pad["pixel_values"])
+                    packed_vision_grid_thw.append(pad["image_grid_thw"])
+                if "pixel_values_videos" in pad:
+                    packed_vision_data.append(pad["pixel_values_videos"])
+                    packed_vision_grid_thw.append(pad["video_grid_thw"])
+                if 'fast_pixel_values_videos' in pad:
+                    fast_packed_vision_data.append(pad["fast_pixel_values_videos"])
+                    fast_packed_vision_grid_thw.append(pad["fast_video_grid_thw"])
 
 
 
@@ -530,6 +532,4 @@ def keye_slowfast_preprocess_packed_seq(
         batch["position_ids"] = batch["position_ids"].transpose(0, 1)
     else:
         raise ValueError(f"Not supported preprocess is False")
-
-
     return batch, packed_seq_params

@@ -18,6 +18,7 @@
 
 
 from unittest import removeResult
+
 import torch
 import torch.nn.functional as F
 from megatron.core import parallel_state as mpu
@@ -261,7 +262,6 @@ def hf_to_mcore_config_dpskv3(
     from megatron.core.transformer.enums import AttnBackend
 
     #from .patch_v012 import apply_patch
-
     #apply_patch()
 
     mla_rope_config = {
@@ -419,7 +419,8 @@ def hf_to_mcore_config_dpskv3(
         return kw_args
 
     transformer_config = MLATransformerConfig(**core_transformer_config_from_args(args))
-    import dataclasses, json
+    import dataclasses
+    import json
     config_dict = dataclasses.asdict(transformer_config)
     json_str = json.dumps(config_dict, indent=4, default=lambda o: str(o), sort_keys=True)
     from verl.utils.logger.aggregate_logger import print_rank_0
@@ -485,4 +486,31 @@ def hf_to_mcore_config_keye_qwen3_slowfast(
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)
     print(f"hf_to_mcore_config_keye_qwen3_slowfast\n\nOverridden TF init config: {args}")
+    return TransformerConfig(**args)
+
+def hf_to_mcore_config_keye_qwen3(
+    hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
+) -> TransformerConfig:
+    args = _get_base_transformer_config(
+        hf_config=hf_config,
+        dtype=dtype,
+        add_bias_linear=False,
+        # qwen specific
+        mrope_section=hf_config.rope_scaling["mrope_section"],
+        # keye
+        qk_layernorm=True,
+        gradient_accumulation_fusion=True,
+        async_tensor_model_parallel_allreduce=True,
+        cross_entropy_loss_fusion=True,
+        cross_entropy_fusion_impl='te',
+        attention_softmax_in_fp32=False,
+        bias_activation_fusion=True,
+        persist_layer_norm=True,
+        bias_dropout_fusion=True,
+        recompute_granularity="selective",
+        recompute_modules=["core_attn", "mlp"],
+    )
+    # override_transformer_config_kwargs as kwargs shall never be none
+    args.update(override_transformer_config_kwargs)
+    print(f"hf_to_mcore_config_keye_qwen3\n\nOverridden TF init config: {args}")
     return TransformerConfig(**args)

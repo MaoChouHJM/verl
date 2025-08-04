@@ -20,13 +20,16 @@ from abc import ABC, abstractmethod
 from token import OP
 from typing import List, Optional, Tuple, Union
 
+from megatron.core.models.gpt.gpt_layer_specs import (
+    get_gpt_layer_with_transformer_engine_spec, get_gpt_mtp_block_spec)
+from megatron.core.models.gpt.gpt_model import GPTModel
+from megatron.core.transformer import (MegatronModule, ModuleSpec,
+                                       TransformerConfig)
+from megatron.core.transformer.transformer_block import \
+    TransformerBlockSubmodules
 from numpy.dtypes import BoolDType
 from pandas._libs.lib import fast_multiget
 
-from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec, get_gpt_layer_with_transformer_engine_spec
-from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.transformer import MegatronModule, TransformerConfig, ModuleSpec
 from verl.models.mcore.qwen2_5_vl import vision_config
 from verl.utils.logger import print_rank_0
 
@@ -37,7 +40,8 @@ def get_gpt_decoder_block_spec(config : TransformerConfig,
                                use_transformer_engine : bool,
                                vp_stage: Optional[int] = None,
 ) -> TransformerBlockSubmodules:
-    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec as get_gpt_decoder_block_spec_mcore
+    from megatron.core.models.gpt.gpt_layer_specs import \
+        get_gpt_decoder_block_spec as get_gpt_decoder_block_spec_mcore
     if os.environ["MEGATRON_EA_VERSION"].lower() == "true":
         return get_gpt_decoder_block_spec_mcore(config, use_transformer_engine=use_transformer_engine, vp_stage=vp_stage)
     else:
@@ -122,7 +126,8 @@ class BaseModelInitializer(ABC):
             )
 
         if post_process and value:
-            from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+            from verl.models.llama.megatron.layers.parallel_linear import \
+                LinearForLastLayer
 
             model.output_layer = LinearForLastLayer(
                 input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig
@@ -253,11 +258,14 @@ class Qwen25VLModel(BaseModelInitializer):
 
         transformer_layer_spec = self.get_transformer_layer_spec()
 
-        from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TERowParallelLinear
+        from megatron.core.extensions.transformer_engine import (
+            TEColumnParallelLinear, TERowParallelLinear)
         from megatron.core.models.gpt.moe_module_specs import MLPSubmodules
-        from megatron.core.models.vision.vit_layer_specs import get_vit_layer_with_transformer_engine_spec
+        from megatron.core.models.vision.vit_layer_specs import \
+            get_vit_layer_with_transformer_engine_spec
 
-        from .qwen2_5_vl import Qwen2_5VLModel, get_vision_model_config, get_vision_projection_config
+        from .qwen2_5_vl import (Qwen2_5VLModel, get_vision_model_config,
+                                 get_vision_projection_config)
 
         vision_transformer_config = get_vision_model_config(deepcopy(tfconfig))
         vision_transformer_config.pipeline_model_parallel_size = 1
@@ -294,7 +302,8 @@ class Qwen25VLModel(BaseModelInitializer):
         )
 
         if post_process and value:
-            from verl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
+            from verl.models.llama.megatron.layers.parallel_linear import \
+                LinearForLastLayer
 
             qwen25_vl_model.language_model.output_layer = LinearForLastLayer(
                 input_size=tfconfig.hidden_size, output_size=1, config=tfconfig
@@ -303,7 +312,7 @@ class Qwen25VLModel(BaseModelInitializer):
         return qwen25_vl_model
 
 class KeyeQwen3SlowFastModel(BaseModelInitializer):
-    """Initializer for Keye models."""
+    """Initializer for KeyeSlowFast models."""
 
     def get_transformer_layer_spec(self, vp_stage):
         if self.tfconfig.num_moe_experts:
@@ -332,11 +341,16 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
         transformer_layer_spec = self.get_transformer_layer_spec(
             vp_stage
         )
-        from megatron.core.models.keye.keye_model_slowfast import KeyeModelSlowFast, SiglipVisionModel, Projector
-        from megatron.core.models.keye.keye_config import get_vision_model_config, VisionTransformerConfig
-        from megatron.core.models.keye.keye_layer_specs import get_vision_model_spec
-
-        vision_config = get_vision_model_config(None, tfconfig) # not use args in get_vision_model_config, set it None
+        from megatron.core.models.keye.keye_config import (
+            VisionTransformerConfig, get_vision_model_config)
+        from megatron.core.models.keye.keye_layer_specs import \
+            get_vision_model_spec
+        from megatron.core.models.keye.keye_model_slowfast import (
+            KeyeModelSlowFast, Projector, SiglipVisionModel)
+        
+        args = self.hf_config
+        args.vision_rope_theta = self.hf_config.vision_config.rope_theta
+        vision_config = get_vision_model_config(args, tfconfig)
         vision_transformer_layer_spec = get_vision_model_spec()
 
         mtp_block_spec = None
@@ -405,6 +419,121 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
         vision_layer_spec=vision_transformer_layer_spec,
         fast_vision_config=vision_config,
         fast_vision_layer_spec=vision_transformer_layer_spec,
+        pre_process=pre_process,
+        post_process=post_process,
+        mtp_block_spec=mtp_block_spec,
+        vp_stage=vp_stage,
+        )
+        print_rank_0(f'initialized\n\n{keye_model=}')
+
+        return keye_model
+
+class KeyeQwen3Model(BaseModelInitializer):
+    """Initializer for Keye models."""
+
+    def get_transformer_layer_spec(self, vp_stage):
+        if self.tfconfig.num_moe_experts:
+            transformer_layer_spec = get_gpt_decoder_block_spec(self.tfconfig,
+             use_transformer_engine=True,
+             normalization=self.tfconfig.normalization,
+             vp_stage=vp_stage)
+        else:
+            transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                num_experts=self.tfconfig.num_moe_experts,
+                moe_grouped_gemm=self.tfconfig.moe_grouped_gemm,
+                qk_layernorm=self.tfconfig.qk_layernorm,
+                multi_latent_attention=self.tfconfig.multi_latent_attention,
+                moe_use_legacy_grouped_gemm=self.tfconfig.moe_use_legacy_grouped_gemm,
+            )
+        return transformer_layer_spec
+
+    def initialize(
+        self,
+        pre_process: bool = None,
+        post_process: bool = None,
+        vp_stage: Optional[int] = None,
+        **extra_kwargs,
+    ):
+        tfconfig = self.tfconfig
+        transformer_layer_spec = self.get_transformer_layer_spec(
+            vp_stage
+        )
+        from megatron.core.models.keye.keye_config import (
+            VisionTransformerConfig, get_vision_model_config)
+        from megatron.core.models.keye.keye_layer_specs import \
+            get_vision_model_spec
+        from megatron.core.models.keye.keye_model import (KeyeModel, Projector,
+                                                          SiglipVisionModel)
+
+        args = self.hf_config
+        args.vision_rope_theta = self.hf_config.vision_config.rope_theta
+        vision_config = get_vision_model_config(args, tfconfig)
+        vision_transformer_layer_spec = get_vision_model_spec()
+
+        mtp_block_spec = None
+        if tfconfig.mtp_num_layers is not None:
+            mtp_block_spec = get_gpt_mtp_block_spec(tfconfig, transformer_layer_spec, use_transformer_engine=True)
+
+        print_rank_0(f"in KeyeQwen3Model initialize\n\ntransformer_config={tfconfig}\n\nvision_config={vision_config}")
+
+        def monkey_patch_init(
+            self,
+            transformer_config: TransformerConfig,
+            hf_config: PretrainedConfig,
+            model_path: str,
+            transformer_layer_spec: ModuleSpec,
+            vision_config: VisionTransformerConfig,
+            fast_vision_config: VisionTransformerConfig,
+            vision_layer_spec: ModuleSpec,
+            fast_vision_layer_spec: ModuleSpec,
+            pre_process: bool = True,
+            post_process: bool = True,
+            mtp_block_spec: Optional[ModuleSpec] = None,
+            vp_stage: Optional[int] = None,
+        ):
+           super(KeyeModel, self).__init__(config=transformer_config)
+           self.config = transformer_config
+           self.vision_config = vision_config
+           self.model_path = model_path
+           self.pre_process = pre_process
+           self.post_process = post_process
+           self.vp_stage = vp_stage
+           if self.pre_process:
+               self.visual = SiglipVisionModel(vision_config, vision_layer_spec, vp_stage)
+               self.mlp_AR = Projector(vision_config, transformer_config.hidden_size)
+
+               # self.fast_visual = SiglipVisionModel(fast_vision_config, fast_vision_layer_spec, vp_stage)
+               # self.fast_mlp_AR = Projector(fast_vision_config, transformer_config.hidden_size)
+
+           self.language_model = GPTModel(
+               config=transformer_config,
+               transformer_layer_spec=transformer_layer_spec,
+               vocab_size=hf_config.vocab_size,
+               #vocab_size=155136, # only for test
+               #max_sequence_length=hf_config.max_position_embeddings,
+               max_sequence_length=327680, # can remove
+               pre_process=pre_process,
+               post_process=post_process,
+               parallel_output=True,
+               position_embedding_type="mrope",
+               rotary_base=hf_config.rope_theta,
+               #rotary_base=10000, # only for test
+               rope_scaling=False,
+               mtp_block_spec=mtp_block_spec,
+               vp_stage=vp_stage,
+           )
+           self.share_embeddings_and_output_weights = (
+               self.language_model.share_embeddings_and_output_weights
+           )
+        KeyeModel.__init__ = monkey_patch_init
+
+        keye_model = KeyeModel(
+        transformer_config=tfconfig,
+        hf_config=self.hf_config,
+        model_path=self.model_path,
+        transformer_layer_spec=transformer_layer_spec,
+        vision_config=vision_config,
+        vision_layer_spec=vision_transformer_layer_spec,
         pre_process=pre_process,
         post_process=post_process,
         mtp_block_spec=mtp_block_spec,

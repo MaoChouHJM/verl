@@ -15,18 +15,15 @@
 # limitations under the License.
 
 from codecs import ascii_encode
-from verl.utils.megatron_utils import unwrap_model
+
 from megatron.core import parallel_state as mpu
 
-from .util import (postprocess_packed_seqs,
- preprocess_packed_seqs,
- recover_left_padding,
- remove_left_padding,
- keye_slowfast_preprocess_packed_seq,
- get_batch_on_this_cp_rank,
- SlowFastVisionPadder,
- )
+from verl.utils.megatron_utils import unwrap_model
 
+from .util import (SlowFastVisionPadder, get_batch_on_this_cp_rank,
+                   keye_slowfast_preprocess_packed_seq,
+                   postprocess_packed_seqs, preprocess_packed_seqs,
+                   recover_left_padding, remove_left_padding)
 
 
 def gptmodel_forward(
@@ -157,6 +154,99 @@ def gptmodel_forward_qwen2_5_vl(
         output = output[..., 0]
     return output
 
+def gptmodel_forward_keye_qwen3(
+    model,
+    input_ids,
+    attention_mask,
+    position_ids,
+    value_model=False,
+    pack_seqs=True,
+    multi_modal_inputs=None,
+    logits_processor=None,
+    logits_processor_args: dict = None,
+    **kwargs,
+):
+    post_process = unwrap_model(model).post_process
+    vp_stage = unwrap_model(model).vp_stage
+    # if not hasattr(gptmodel_forward_keye_qwen3, 'slowfast_padder'):
+    #     base_model_dir = unwrap_model(model).model_path
+    #     from transformers import AutoProcessor
+    #     processor = AutoProcessor.from_pretrained(base_model_dir)
+    #     gptmodel_forward_keye_qwen3.slowfast_padder = SlowFastVisionPadder(processor)
+    
+    if pack_seqs:
+        batch_size, seq_len = attention_mask.shape[:2]
+        batch, packed_seq_params_ori = keye_slowfast_preprocess_packed_seq(
+            input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            multi_modal_inputs=multi_modal_inputs,
+            pre_process=True,
+            image_token_id=unwrap_model(model).hf_config.image_token_id,
+            video_token_id=unwrap_model(model).hf_config.video_token_id,
+            )
+        batch = get_batch_on_this_cp_rank(batch)
+        from megatron.core.packed_seq_params import PackedSeqParams
+        packed_seq_params = PackedSeqParams(
+                qkv_format="thd",
+                cu_seqlens_q=batch["cu_seqlens"],
+                cu_seqlens_kv=batch["cu_seqlens"],
+                max_seqlen_q=batch["max_seqlen"],
+                max_seqlen_kv=batch["max_seqlen"],
+            )
+        vision_packed_seq_params = None
+        if mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=vp_stage):
+            if vp_stage is None or vp_stage == 0:
+                vision_packed_seq_params = PackedSeqParams(
+                    qkv_format="thd",
+                    cu_seqlens_q=batch["vision_cu_seqlens"],
+                    cu_seqlens_kv=batch["vision_cu_seqlens"],
+                    max_seqlen_q=batch["vision_max_seqlen"],
+                    max_seqlen_kv=batch["vision_max_seqlen"],
+                )
+
+        output_tensor = model(
+            input_ids=batch.get("input_ids", None),
+            position_ids=batch.get("position_ids", None),
+            attention_mask=batch.get("attention_mask", None),
+            labels=batch.get("labels", None),
+            packed_seq_params=packed_seq_params,
+            vision_data=batch.get("vision_data", None),
+            vision_position_ids=batch.get("vision_position_ids", None),
+            vision_grid_thw=batch.get("vision_grid_thw", None),
+            vision_packed_seq_params=vision_packed_seq_params,
+            loss_mask=batch.get("loss_mask", None),
+        )
+
+        if post_process and logits_processor is not None:
+            args = {
+                k: get_batch_on_this_cp_rank(keye_slowfast_preprocess_packed_seq(
+                    v,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                    multi_modal_inputs=multi_modal_inputs,
+                    pre_process=True,
+                    image_token_id=unwrap_model(model).hf_config.image_token_id,
+                    video_token_id=unwrap_model(model).hf_config.video_token_id,
+                    )[0]["input_ids"])
+                for k, v in logits_processor_args.items()
+            }
+            output_dict = logits_processor(output_tensor, **args)
+            output = {
+                k: postprocess_packed_seqs(
+                    v, packed_seq_params_ori, attention_mask, batch_size, seq_len, post_process=post_process
+                )
+                for k, v in output_dict.items()
+            }
+        else:
+            output = postprocess_packed_seqs(
+                output_tensor, packed_seq_params_ori, attention_mask, batch_size, seq_len, post_process=post_process
+            )
+    else:
+        raise ValueError(f"slowfast model does not support non-packed sequence")
+    if value_model and post_process:
+        output = output[..., 0]
+    return output
 
 def gptmodel_forward_keye_qwen3_slowfast(
     model,
