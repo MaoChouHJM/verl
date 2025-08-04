@@ -17,7 +17,7 @@ import argparse
 import os
 import warnings
 from contextlib import contextmanager
-from typing import Any, Callable, ContextManager
+from typing import Any, Callable, ContextManager, Optional
 
 import torch
 from accelerate import init_empty_weights
@@ -257,14 +257,31 @@ def convert_checkpoint_from_transformers_to_megatron_qwen2_5_vl(hfmodel, mgmodel
 
     assert n_params == copied_numel
 
-
-@torch.no_grad()
-def convert_checkpoint_from_transformers_to_megatron_dpskv3(hf_model, model, hf_config, tfconfig):
+@torch.inference_mode()
+def convert_checkpoint_from_transformers_to_megatron_dpskv3(
+    hf_model,
+    model,
+    hf_config,
+    tfconfig,
+    layer_start_end: Optional[tuple[int, int]] = None,
+):
     warnings.warn("MTP model is not supported yet", stacklevel=2)
+    if layer_start_end is None:
+        layer_start_end = (0, len(model.decoder.layers))
+    layer_start, layer_end = layer_start_end
     numel: int = 0
-    numel += safe_copy(hf_model.model.embed_tokens.weight, model.embedding.word_embeddings.weight)
-    print(f"{numel=}")
-    for layer_idx, (layer, hf_layer) in enumerate(zip(model.decoder.layers, hf_model.model.layers)):
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    if pp_rank == 0:
+        numel += safe_copy(hf_model.model.embed_tokens.weight, model.embedding.word_embeddings.weight)
+
+    assert len(model.decoder.layers) == (layer_end - layer_start), (
+        f"Expected {len(model.decoder.layers)} layers, but got {layer_end - layer_start}"
+    )
+    for layer_idx, (layer, hf_layer) in enumerate(
+        zip(model.decoder.layers, hf_model.model.layers[layer_start:layer_end], strict=True)
+    ):
+        global_layer_idx = layer_idx + layer_start
         numel_cur: int = numel
         numel += safe_copy(hf_layer.input_layernorm.weight, layer.input_layernorm.weight)
 
@@ -318,13 +335,14 @@ def convert_checkpoint_from_transformers_to_megatron_dpskv3(hf_model, model, hf_
             )
             numel += safe_copy(shared_fc1_weight, layer.mlp.shared_experts.linear_fc1.weight)
             numel += safe_copy(hf_layer.mlp.shared_experts.down_proj.weight, layer.mlp.shared_experts.linear_fc2.weight)
-            print(f"{layer_idx=} {numel=} numel this layer={numel - numel_cur}")
+        print(f"{pp_rank=} {global_layer_idx=} {layer_idx=} {numel=} numel this layer={numel - numel_cur}")
+        assert numel - numel_cur == sum([i.numel() for i in hf_layer.state_dict().values()]), "numel mismatch"
 
-    numel += safe_copy(hf_model.model.norm.weight, model.decoder.final_layernorm.weight)
-
-    if not hf_config.tie_word_embeddings:
-        numel += safe_copy(hf_model.lm_head.weight, model.output_layer.weight)
-    print(f"{numel=}")
+    if pp_rank == pp_size - 1:
+        numel += safe_copy(hf_model.model.norm.weight, model.decoder.final_layernorm.weight)
+        if not hf_config.tie_word_embeddings:
+            numel += safe_copy(hf_model.lm_head.weight, model.output_layer.weight)
+    print(f"{pp_rank=} {numel=}")
     return numel
 
 
