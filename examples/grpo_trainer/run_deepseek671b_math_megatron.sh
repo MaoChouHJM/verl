@@ -7,7 +7,9 @@ set -x
 
 # 1. download the dist_ckpt format model from https://huggingface.co/BearBiscuit05/dpsk-v3-671B-BF16-dist_ckpt/tree/main
 # change the HF_MODEL_PATH and DIST_CKPT_PATH to your own path
-DIST_CKPT_PATH="/nlp_group/huangjiaming/deepseek_v3"
+# DIST_CKPT_PATH="/nlp_group/huangjiaming/DeepSeek-R1-bf16-5/"
+# DIST_CKPT_PATH="/nlp_group/huangjiaming/hjm_dbg/"
+DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/converted_params"
 LLM="/nlp_group/huangjiaming/deepseek_v3"
 HOME=/nlp_group/huangjiaming/
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
@@ -63,6 +65,9 @@ fi
 
 
 
+
+
+
 # RAY_ADDRESS='auto' ray job submit --working-dir . --
 python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
     algorithm.adv_estimator=grpo \
@@ -80,7 +85,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.load_weight=False \
+    actor_rollout_ref.actor.load_weight=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.mode=$rollout_mode \
@@ -112,14 +117,14 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.actor.profile.step_end=6 \
     actor_rollout_ref.actor.profile.save_path=/nlp_group/huangjiaming/logits-distill/ \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_layer_freq=[0,0,0,1,1,1,1,1,1,1,1,1,1] \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_layer_freq=[0,0,0,1,1] \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_group_topk=4 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_num_groups=8 \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout="\"[['embedding','decoder']]+[['decoder','decoder']]*6+[['loss']]\"" \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout="\"Et|(tt|)*2L\"" \
     +actor_rollout_ref.actor.megatron.override_transformer_config.combined_1f1b=False \
     +actor_rollout_ref.actor.megatron.override_transformer_config.delay_wgrad_compute=False \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.fp8_param_gather=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.fp8='e4m3' \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.fp8_param_gather=False \
     +actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe='blockwise' \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$PP \
     actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=$VPP \
