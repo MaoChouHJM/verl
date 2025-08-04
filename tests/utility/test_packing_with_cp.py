@@ -426,7 +426,6 @@ def convert_sample_to_verl_input(samples):
         attention_mask[idx, : seq_len] = 1 
         padding_len = max_len - seq_len
         s['input_ids']  = torch.cat([s['input_ids'], torch.zeros((1, padding_len), dtype=s['input_ids'].dtype)], dim=-1)
-        input_ids = s['input_ids']
         s['position_ids']  = torch.cat([s['position_ids'], torch.zeros((3, 1, padding_len), dtype=s['position_ids'].dtype)], dim=-1)
        
     VISION_KEYS = ['pixel_values', 'image_grid_thw', 'pixel_values_videos',
@@ -440,8 +439,6 @@ def convert_sample_to_verl_input(samples):
     
     for k in multi_modal_input.keys():
         multi_modal_input[k] = torch.cat(multi_modal_input[k], dim=0)
-
-    cat = torch.cat([s['input_ids'] for s in samples], dim=0)
 
     return torch.cat([s['input_ids'] for s in samples], dim=0), torch.cat([s['position_ids'] for s in samples], dim=1).transpose(0, 1), attention_mask, multi_modal_input
 

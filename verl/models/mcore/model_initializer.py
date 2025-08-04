@@ -45,9 +45,10 @@ def get_gpt_decoder_block_spec(config : TransformerConfig,
 class BaseModelInitializer(ABC):
     """Base class for model initializers."""
 
-    def __init__(self, tfconfig: TransformerConfig, hf_config: PretrainedConfig):
+    def __init__(self, tfconfig: TransformerConfig, hf_config: PretrainedConfig, model_path: str):
         self.tfconfig = tfconfig
         self.hf_config = hf_config
+        self.model_path = model_path
 
     @abstractmethod
     def get_transformer_layer_spec(self):
@@ -348,6 +349,7 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
             self,
             transformer_config: TransformerConfig,
             hf_config: PretrainedConfig,
+            model_path: str,
             transformer_layer_spec: ModuleSpec,
             vision_config: VisionTransformerConfig,
             fast_vision_config: VisionTransformerConfig,
@@ -361,6 +363,7 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
            super(KeyeModelSlowFast, self).__init__(config=transformer_config)
            self.config = transformer_config
            self.vision_config = vision_config
+           self.model_path = model_path
            self.pre_process = pre_process
            self.post_process = post_process
            self.vp_stage = vp_stage
@@ -396,6 +399,7 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
         keye_model = KeyeModelSlowFast(
         transformer_config=tfconfig,
         hf_config=self.hf_config,
+        model_path=self.model_path,
         transformer_layer_spec=transformer_layer_spec,
         vision_config=vision_config,
         vision_layer_spec=vision_transformer_layer_spec,

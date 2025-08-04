@@ -202,6 +202,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                     parallel_model = init_mcore_model(
                         self.tf_config,
                         self.hf_config,
+                        self.config.model.path,
                         pre_process,
                         post_process,
                         share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,

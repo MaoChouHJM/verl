@@ -164,6 +164,7 @@ def hf_to_mcore_config(
 def init_mcore_model(
     tfconfig: TransformerConfig,
     hf_config: PretrainedConfig,
+    model_path: str,
     pre_process: bool = True,
     post_process: bool = None,
     *,
@@ -190,7 +191,7 @@ def init_mcore_model(
     assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
     model = get_supported_model(hf_config.architectures[0])
     initializer_cls = MODEL_INITIALIZER_REGISTRY[model]
-    initializer = initializer_cls(tfconfig, hf_config)
+    initializer = initializer_cls(tfconfig, hf_config, model_path)
     return initializer.initialize(pre_process=pre_process, post_process=post_process, share_embeddings_and_output_weights=share_embeddings_and_output_weights, value=value, vp_stage=vp_stage, **extra_kwargs)
 
 

@@ -462,10 +462,11 @@ class MegatronPPOActor(BasePPOActor):
                 list(range(len(mini_batch.non_tensor_batch["multi_modal_inputs"])))
             ).to(torch.int64)
 
-        if mini_batch.batch["position_ids"].dim() == 3:  # qwen2vl mrope [bs, 3, seq_len]
-            mini_batch.batch["position_ids"] = mini_batch.batch["position_ids"][
-                :, 0
-            ]  # mcore patch recompute qwen2vl's pos ids during forward
+        # NOTE(huangjiaming): other vlm model need this position ids
+        # if mini_batch.batch["position_ids"].dim() == 3:  # qwen2vl mrope [bs, 3, seq_len]
+            # mini_batch.batch["position_ids"] = mini_batch.batch["position_ids"][
+                # :, 0
+            # ]  # mcore patch recompute qwen2vl's pos ids during forward
 
         indices = None
         if use_dynamic_bsz:
@@ -605,7 +606,8 @@ class MegatronPPOActor(BasePPOActor):
 
             multi_modal_inputs = {}
             if "multi_modal_inputs" in batch:
-                for key in batch["multi_modal_inputs"][0].keys():
+                all_keys = {key for d in batch["multi_modal_inputs"] for key in d.keys()}
+                for key in all_keys:
                     idxs = batch["multi_modal_inputs_idx"]
                     mmi = batch["multi_modal_inputs"]
                     multi_modal_inputs[key] = torch.cat(
