@@ -1,7 +1,7 @@
 import os
 import re
 from typing import Dict, List, Union
-
+import time
 import json
 import numpy as np
 
@@ -79,7 +79,24 @@ class Singleton(object):
         return cls._instances[cls]
 
 
-async def llm_openai_api(
+NUM_CLIENTS = 20
+NUM_MAX_CONNENCTIONS_PER_CLIENT = 20
+NUM_MAX_KEEPALIVE_CONNECTIONS_PER_CLIENT = 5
+
+DUMMY_RESPONSE = True
+
+
+client = httpx.AsyncClient(timeout=httpx.Timeout(600.0), limits=httpx.Limits(
+    max_connections=NUM_MAX_CONNENCTIONS_PER_CLIENT, 
+    max_keepalive_connections=NUM_MAX_KEEPALIVE_CONNECTIONS_PER_CLIENT))
+
+clients = [httpx.AsyncClient(timeout=httpx.Timeout(600.0), limits=httpx.Limits(
+    max_connections=NUM_MAX_CONNENCTIONS_PER_CLIENT, 
+    max_keepalive_connections=NUM_MAX_CONNENCTIONS_PER_CLIENT))
+    for _ in range(NUM_CLIENTS)]
+
+
+async def llm_openai_api_multiple_clients(
     messages,
     ip="127.0.0.1",
     host="1222",
@@ -88,21 +105,19 @@ async def llm_openai_api(
     top_p=0.8,
     openai_api_key="EMPTY",
     n=1,  # from lxy
+    idx=-1,
 ):
+    my_client = clients[idx%NUM_CLIENTS]
     openai_api_base = f"http://{ip}:{host}/v1"
-    # 使用异步 HTTP 客户端
-    async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
-        # 获取可用模型
-        model_list = await client.get(
+    model_list = await my_client.get(
             f"{openai_api_base}/models",
             headers={"Authorization": f"Bearer {openai_api_key}"},
         )
-        model_list.raise_for_status()
-        models = model_list.json()
-        model = models["data"][0]["id"]
-
-        # 发起 chat.completions 异步请求
-        resp = await client.post(
+    model_list.raise_for_status()
+    models = model_list.json()
+    model = models["data"][0]["id"]
+    
+    resp = await my_client.post(
             f"{openai_api_base}/chat/completions",
             headers={"Authorization": f"Bearer {openai_api_key}"},
             json={
@@ -114,12 +129,52 @@ async def llm_openai_api(
                 "n": n,
             },
         )
-        resp.raise_for_status()
-        response_data = resp.json()
-        if n == 1:
-            return response_data["choices"][0]["message"]["content"]
-        else:
-            return [choice["message"]["content"] for choice in response_data["choices"]]
+    resp.raise_for_status()
+    response_data = resp.json()
+    if n == 1:
+        return response_data["choices"][0]["message"]["content"]
+    else:
+        return [choice["message"]["content"] for choice in response_data["choices"]]
+
+
+
+async def llm_openai_api(
+    messages,
+    ip="127.0.0.1",
+    host="1222",
+    temperature=0.7,
+    max_tokens=2048,
+    top_p=0.8,
+    openai_api_key="EMPTY",
+    n=1,  # from lxy
+):
+    openai_api_base = f"http://{ip}:{host}/v1"
+    model_list = await client.get(
+            f"{openai_api_base}/models",
+            headers={"Authorization": f"Bearer {openai_api_key}"},
+        )
+    model_list.raise_for_status()
+    models = model_list.json()
+    model = models["data"][0]["id"]
+    
+    resp = await client.post(
+            f"{openai_api_base}/chat/completions",
+            headers={"Authorization": f"Bearer {openai_api_key}"},
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": top_p,
+                "n": n,
+            },
+        )
+    resp.raise_for_status()
+    response_data = resp.json()
+    if n == 1:
+        return response_data["choices"][0]["message"]["content"]
+    else:
+        return [choice["message"]["content"] for choice in response_data["choices"]]
 
 
 class ModelBaseAccuracy(object):
@@ -144,10 +199,15 @@ class ModelBaseAccuracy(object):
         Returns:
             list[float]: Reward scores
         """
+        start = time.perf_counter()
         cur_task = self.loop.create_task(
             self.async_call(completions, solution_str, **kwargs)
         )
-        return self.loop.run_until_complete(cur_task)
+        result = self.loop.run_until_complete(cur_task)
+        sync_time = (time.perf_counter() - start) * 1000
+
+        print(f"ModelBaseAccuracy Sync task time: {sync_time}")
+        return result
 
     async def async_call(self, completions, solution_str, **kwargs) -> float:
         # NOTE(huangjiaming): completions  batch_size = 1
@@ -160,6 +220,7 @@ class ModelBaseAccuracy(object):
         swift_reward_types = kwargs.get("swift_reward_type", ["model_base"] * len(completions))
         length = len(completions)
         tasks = []
+        print(f"keye reward io request number: {length}")
         for cur_idx, (
             content,
             sol,
@@ -176,11 +237,15 @@ class ModelBaseAccuracy(object):
             ]
             reward = asyncio.create_task(
                 self.evaluate(
-                    content, sol, question, cur_address, cur_port, swift_reward_type, prompt_type
+                    content, sol, question, cur_address, cur_port, swift_reward_type, prompt_type, cur_idx
                 )
             )
             tasks.append(reward)
+        for_end = time.perf_counter()
         rewards = await asyncio.gather(*tasks)
+        result_end = time.perf_counter()
+        ModelBaseAccuracy_Call_Asyncio_gather_time = (result_end - for_end) * 1000
+        print(f"ModelBaseAccuracy_Call_Asyncio_gather_time: {ModelBaseAccuracy_Call_Asyncio_gather_time}")  
         # only need float reward
         #reward = rewards[0]
         return rewards
@@ -195,6 +260,7 @@ class ModelBaseAccuracy(object):
         cur_port,
         swift_reward_type,
         prompt_type,
+        cur_idx,
         **kwargs,
     ) -> float:
         """
@@ -209,108 +275,121 @@ class ModelBaseAccuracy(object):
         # hardcode model_base
         swift_reward_type="model_base"
         reward = 0.0
-        # if swift_reward_type != "model_base":
-        #     return reward
-        try:
-            if prompt_type == "longcot":
-                # longcot 格式错误直接返回 0
-                pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
-                match = re.match(pattern, cur_completion, re.DOTALL | re.MULTILINE)
-                if not match:
-                    return reward
-                think_match = re.search(
-                    r"<think>(.*?)</think>", cur_completion, re.DOTALL | re.MULTILINE
-                )
-                answer_match = re.search(
-                    r"<answer>(.*?)</answer>", cur_completion, re.DOTALL | re.MULTILINE
-                )
-                if not think_match or not answer_match:
-                    return reward
-                think_content = think_match.group(1).strip()
-                answer_content = answer_match.group(1).strip()
-            else:
-                think_content = ""
-                answer_content = cur_completion
 
-            prompt = (
-                prompt_template.replace("{Question}", question)
-                .replace("{Ground_Truth}", cur_solution)
-                .replace("{Model_Thought_Process}", think_content)
-                .replace("{Model_Output}", answer_content)
-            )
-            messages = [{"role": "user", "content": prompt}]
-            max_try = 30
-            for i in range(max_try):
-                try:
-                    completion = await llm_openai_api(
-                        messages, ip=cur_address, host=cur_port
+        if DUMMY_RESPONSE:
+            delay = 80.0
+            await asyncio.sleep(delay)
+        else:
+            if swift_reward_type != "model_base":
+                return reward
+            try:
+                # setting_start = time.perf_counter()
+                if prompt_type == "longcot":
+                    # longcot 格式错误直接返回 0
+                    pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
+                    match = re.match(pattern, cur_completion, re.DOTALL | re.MULTILINE)
+                    if not match:
+                        return reward
+                    think_match = re.search(
+                        r"<think>(.*?)</think>", cur_completion, re.DOTALL | re.MULTILINE
                     )
-                    completion = (
-                        completion[0] if isinstance(completion, list) else completion
+                    answer_match = re.search(
+                        r"<answer>(.*?)</answer>", cur_completion, re.DOTALL | re.MULTILINE
                     )
-                    
-                    # # print(f'lcy0318-completion-{prompt}-{completion}')
-                    # json_str = completion[
-                    #     completion.rfind("{") : completion.rfind("}") + 1
-                    # ]
-                    # json_str = json_str.replace("\\", "\\\\")
-                    # completion = json.loads(json_str)
-                    
-                    pattern = r'\{\s*[^{}]*"Comments":.*?"\n\}'
-                    json_strings = re.findall(pattern, completion, re.DOTALL)
-                    json_str = json_strings[-1]
-                    try:
-                        completion = json.loads(json_str)
-                    except:
-                        completion = eval(json_str)
+                    if not think_match or not answer_match:
+                        return reward
+                    think_content = think_match.group(1).strip()
+                    answer_content = answer_match.group(1).strip()
+                else:
+                    think_content = ""
+                    answer_content = cur_completion
 
+                prompt = (
+                    prompt_template.replace("{Question}", question)
+                    .replace("{Ground_Truth}", cur_solution)
+                    .replace("{Model_Thought_Process}", think_content)
+                    .replace("{Model_Output}", answer_content)
+                )
+                messages = [{"role": "user", "content": prompt}]
+                max_try = 3
+                
+                # tryloop_start = time.perf_counter()
+                # api_time = 0
+                for i in range(max_try):
                     try:
-                        with open(
-                            f"./plugin_completion_log/rank{self.rank}.jsonl",
-                            "a",
-                            encoding="utf-8",
-                        ) as f:
-                            dump_data = {
-                                "prompt": prompt,
-                                "completion": completion,
-                            }
-                            f.write(json.dumps(dump_data, ensure_ascii=False) + "\n")
-                            f.flush()
-                    except:
-                        pass
-                    
-                    correctness = completion["Correctness"]
-                    thought_process = completion["Thought_Process"]
-                    thought_Process_quality = completion["Thought_Process_Quality"] # "High/Medium/Low"
-                    break
-                except Exception as e:
-                    print(f"xx-retry_{i}-{e}")
-                    try:
-                        print(completion)
-                    except:
-                        pass
-                    continue
-            if prompt_type == "longcot":
-                if (
-                    correctness.lower() == "yes"
-                    and thought_process.lower() == "related"
-                ):
-                    if swift_reward_type == "model_base":
-                        reward += 1.0
-                elif thought_process.lower() == "unrelated":
-                    reward -= 0.5
-                if thought_Process_quality.lower() == "medium":
-                    reward -= 0.3
-                elif thought_Process_quality.lower() == "low":
-                    reward -= 0.8
-                # 最低 -1.0
-                reward = max(-1.0, reward)
-            else:
-                if correctness.lower() == "yes":
-                    if swift_reward_type == "model_base":
-                        reward += 1.0
-        except Exception as e:
-            print(e)
+                        completion = await llm_openai_api_multiple_clients(
+                            messages, ip=cur_address, host=cur_port, idx=cur_idx
+                        )
+
+                        completion = (
+                            completion[0] if isinstance(completion, list) else completion
+                        )
+                        
+                        # # print(f'lcy0318-completion-{prompt}-{completion}')
+                        # json_str = completion[
+                        #     completion.rfind("{") : completion.rfind("}") + 1
+                        # ]
+                        # json_str = json_str.replace("\\", "\\\\")
+                        # completion = json.loads(json_str)
+                        
+                        pattern = r'\{\s*[^{}]*"Comments":.*?"\n\}'
+                        json_strings = re.findall(pattern, completion, re.DOTALL)
+                        json_str = json_strings[-1]
+                        try:
+                            completion = json.loads(json_str)
+                        except:
+                            completion = eval(json_str)
+
+                        try:
+                            with open(
+                                f"./plugin_completion_log/rank{self.rank}.jsonl",
+                                "a",
+                                encoding="utf-8",
+                            ) as f:
+                                dump_data = {
+                                    "prompt": prompt,
+                                    "completion": completion,
+                                }
+                                f.write(json.dumps(dump_data, ensure_ascii=False) + "\n")
+                                f.flush()
+                        except:
+                            pass
+                        
+                        correctness = completion["Correctness"]
+                        thought_process = completion["Thought_Process"]
+                        thought_Process_quality = completion["Thought_Process_Quality"] # "High/Medium/Low"
+                        break
+                    except Exception as e:
+                        print(f"xx-retry_{i}-{e}")
+                        try:
+                            print(f"enter exception msg area")
+                        except:
+                            pass
+                        continue
+
+                if prompt_type == "longcot":
+                    if (
+                        correctness.lower() == "yes"
+                        and thought_process.lower() == "related"
+                    ):
+                        if swift_reward_type == "model_base":
+                            reward += 1.0
+                    elif thought_process.lower() == "unrelated":
+                        reward -= 0.5
+                    if thought_Process_quality.lower() == "medium":
+                        reward -= 0.3
+                    elif thought_Process_quality.lower() == "low":
+                        reward -= 0.8
+                    # 最低 -1.0
+                    reward = max(-1.0, reward)
+                else:
+                    if correctness.lower() == "yes":
+                        if swift_reward_type == "model_base":
+                            reward += 1.0
+            except Exception as e:
+                print(e)
+
+        
         return reward
 
 
@@ -374,12 +453,15 @@ class MyFormat(object):
         swift_reward_types = kwargs.get(
             "swift_reward_type", ["model_base"] * len(completion))
         pattern = r"^<think>.*?</think>\s*<answer>.*?</answer>(?![\s\S])"
+
         matches =  [(re.match(pattern, content, re.DOTALL | re.MULTILINE)
                   if prompt_type == "longcot"  # longcot
                   else not re.match(pattern, content, re.DOTALL | re.MULTILINE))
                   for content, prompt_type in zip(completion, prompt_types)]
-        
-        return [0.0 if match else -1.0 for match in matches]
+        res = [0.0 if match else -1.0 for match in matches]
+
+
+        return res
 
 
 class KeyeComputeReward(object):
@@ -389,6 +471,7 @@ class KeyeComputeReward(object):
         reward_fn_types = reward_kwargs.get("reward_fn_types", "")
         assert reward_fn_types != ""
         reward_fn_types = reward_fn_types.split(',')
+
         for reward_fn_type in reward_fn_types:
             self.reward_fns.append(eval(reward_fn_type.strip())(**reward_kwargs))
         reward_sum_weights = reward_kwargs.get("reward_sum_weights",[1.0] * len(self.reward_fns))
@@ -396,12 +479,16 @@ class KeyeComputeReward(object):
             reward_sum_weights = [float(x.strip()) for x in reward_sum_weights.split(',')]
         assert len(reward_sum_weights) == len(self.reward_fns)
         self.reward_sum_weights = reward_sum_weights
+       
     
     def __call__(self, solution_str, ground_truth, **kwargs):
         #rewards = np.array([fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns])
-        rewards = list(zip(*[fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns]))
+        rewards = [fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns]
+        rewards = zip(*rewards)
+        rewards = list(rewards)
         print(f"{rewards=}")
-        return [np.dot(reward, np.array(self.reward_sum_weights)) for reward in rewards]
+        res = [np.dot(reward, np.array(self.reward_sum_weights)) for reward in rewards]
+        return res
 
 
 if __name__ == "__main__":
@@ -409,10 +496,17 @@ if __name__ == "__main__":
             'prompt_type': ['longcot', 'longcot'], 
             'messages': [np.array([{'content': '\nQuestion:\n<image [1]> Question: Add 6 matte cylinders. How many matte cylinders are left?/think', 'role': 'user'}], dtype=object),
                          np.array([{'content': '\nQuestion:\nWithin quadrilateral ABCD, with midpoints E and F on sides AB and AD respectively, and EF = 6, BC = 13, and CD = 5, what is the area of triangle DBC?\nChoices:\nA: 60\nB: 30\nC: 48\nD: 65', 'role': 'user'}], dtype=object)]}
+    
     reward_cls = KeyeComputeReward(
         reward_fn_types="ModelBaseAccuracy,MyFormat",
-        model_api_address="10.82.121.34,10.82.122.98,10.82.120.218",
-        model_api_port="8000")
+    # model_api_address="10.82.121.34,10.82.122.98,10.82.120.218",
+        model_api_address="10.82.248.34",
+    # model_api_port="8000")
+        model_api_port="1222")
+
+    
+    # message = [{'role': 'user', 'content': '\nYou are a expert assistant. I have a question, and a model will respond based on the question and the image provided (you can not see image here). \nThe model will first output its thought process, followed by the final answer. I need your help to evaluate the correctness of the model\'s output and its thought process.\nThough you can not see the provided image, I will provide the ground truth for your reference. \n\n#### Question: \n\nQuestion:\nWithin quadrilateral ABCD, with midpoints E and F on sides AB and AD respectively, and EF = 6, BC = 13, and CD = 5, what is the area of triangle DBC?\nChoices:\nA: 60\nB: 30\nC: 48\nD: 65\n\n\n#### Ground Truth: \n$B$\n\n\n#### Model Thought Process: \nthis my thinking result.\n\n\n#### Model Output: \nB\n\n\n\nPlease provide your evaluation based on the following criteria:\n1. Is the thought process related to the question? If the model\'s thought process contains very irrelevant information, please mark it as "Unrelated".\n2. Is the model\'s output correct based on the ground truth? If the model\'s output is correct, please mark it as "Yes". Otherwise, please mark it as "No".\n3. Evaluate the quality of the thought process. If the thought process is well-structured, logical, and comprehensive, mark it as "High". If it is somewhat logical but lacks details or has minor flaws, mark it as "Medium". If it is poorly structured or contains significant errors, mark it as "Low".\n4. You fisrt need to read the question and the ground truth, then read the model\'s thought process and output.\n5. Before you provide your evaluation, please give a brief comment to help us understand your evaluation better.\n6. Output your evaluation in the json format: \n```\n{\n    "Comments": "Your brief comment.",\n    "Correctness": "Yes/No",\n    "Thought_Process": "Related/Unrelated",\n    "Thought_Process_Quality": "High/Medium/Low"\n}\n```\n'}]
+    
     reward = reward_cls(["<think>The problem that users need to solve now is calculating the number of original matte cylinders after adding 6 more. First, let's look at the matte cylinders in the scene: there are two in the original image, one gray large cylinder and one red small cylinder. Then, add 6 more, so the total is 2 + 6 = 8. It is necessary to confirm whether the count of original matte cylinders is correct. Look at each object:\nGray large cylinder: matte\nRed small cylinder: matte\nSo originally there were 2, then add 6, resulting in a total of 8.</think><answer>\boxed{8}</answer>",
                          "<think>this my thinking result.</think><answer>B</answer>"], ["$8$", "$B$"], **kwargs)
     print(reward)
