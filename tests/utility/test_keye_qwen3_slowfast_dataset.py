@@ -1,14 +1,15 @@
-from multiprocessing import process
-import sys
 import json
+import sys
 import token
-from torchdata.stateful_dataloader import StatefulDataLoader
-from verl.utils.dataset.keye_qwen3_slowfast_dataset import collate_fn
-from verl.utils.dataset.keye_qwen3_slowfast_dataset import KeyeQwen3SlowFastDataset
+from multiprocessing import process
+
 from omegaconf import DictConfig, OmegaConf
+from torchdata.stateful_dataloader import StatefulDataLoader
+
 from verl.protocol import DataProto
 from verl.utils import hf_processor, hf_tokenizer
-
+from verl.utils.dataset.keye_qwen3_slowfast_dataset import (
+    KeyeQwen3SlowFastDataset, collate_fn)
 
 config = OmegaConf.create({
     "base_model_dir" : "/mmu_mllm_hdd_2/zhouyang12/models/Keye-8B-demo_hf_vit_rope_slowfast_0714",
@@ -60,4 +61,5 @@ for batch_dict in data_loader:
 #    assert len(empty_model_inputs) == 0, f"{len(empty_model_inputs)=} {len(batch)=}"
 
     #print(f"Received batch: ")
+    #break
     #break

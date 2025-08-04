@@ -40,6 +40,9 @@ fi
 export HYDRA_FULL_ERROR=1
 
 python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
+    ++user_custom_env.USE_SLOW_FAST=False \
+    ++user_custom_env.MIN_PIXELS=1024 \
+    ++user_custom_env.MAX_PIXELS=1310720 \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
@@ -49,6 +52,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     data.max_response_length=1024 \
     data.filter_overlong_prompts=False \
     data.truncation='error' \
+    actor_rollout_ref.model.custom_chat_template="{% set image_count = namespace(value=0) %}{% set video_count = namespace(value=0) %}{% for message in messages %}<|im_start|>{{ message['role'] }}\n{% if message['content'] is string %}{{ message['content'] }}<|im_end|>\n{% else %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}{% set image_count.value = image_count.value + 1 %}{% if add_vision_id %}Picture {{ image_count.value }}: {% endif %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}{% set video_count.value = video_count.value + 1 %}{% if add_vision_id %}Video {{ video_count.value }}: {% endif %}<|vision_start|><|video_pad|><|vision_end|>{% elif 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}" \
     actor_rollout_ref.model.path=$LLM \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -63,17 +67,12 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.gpu_memory_utilization=0.60 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.temperature=1.0 \
-    actor_rollout_ref.rollout.top_p=1.0 \
-    actor_rollout_ref.rollout.top_k=-1 \
+    actor_rollout_ref.rollout.top_p=0.9 \
+    actor_rollout_ref.rollout.top_k=50 \
+    ++actor_rollout_ref.rollout.repetition_penalty=1.1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$INFER_TP \
     actor_rollout_ref.rollout.free_cache_engine=True \
     +actor_rollout_ref.rollout.override_config.chunked_prefill_size=32768 \
-    +actor_rollout_ref.rollout.override_config.moe_dense_tp_size=1 \
-    +actor_rollout_ref.rollout.override_config.enable_deepep_moe=True \
-    +actor_rollout_ref.rollout.override_config.deepep_mode=normal \
-    +actor_rollout_ref.rollout.override_config.dp_size=$INFER_TP \
-    +actor_rollout_ref.rollout.override_config.enable_dp_attention=True \
-    +actor_rollout_ref.rollout.override_config.enable_dp_lm_head=True \
     algorithm.use_kl_in_reward=False \
     trainer.logger=['console'] \
     trainer.project_name=$project_name \

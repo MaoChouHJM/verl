@@ -13,18 +13,18 @@
 # limitations under the License.
 
 import copy
+import json
 import os
 import re
-import json
 from collections import defaultdict
-from tkinter import N, NE
+from tkinter import NE, N
 from typing import List, Optional, Union
 
 import datasets
 import numpy as np
 import torch
 from omegaconf import DictConfig, ListConfig
-from transformers import PreTrainedTokenizer, ProcessorMixin, AutoConfig
+from transformers import AutoConfig, PreTrainedTokenizer, ProcessorMixin
 
 import verl.utils.torch_functional_vl as verl_F
 from verl.utils.dataset import RLHFDataset
@@ -76,9 +76,13 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         self.config = config
         self.hf_config = AutoConfig.from_pretrained(base_model_dir, trust_remote_code=True)
         
-        from examples.keye.processors.utils_slowfast import get_rope_index_slowfast, process_vision_info
-        self.process_vision_info_func = process_vision_info
-        self.get_rope_index_func = get_rope_index_slowfast
+        if os.environ.get("USE_SLOW_FAST", "false").lower() == "true":
+            from examples.keye.processors.utils_slowfast import (
+                get_rope_index_slowfast, process_vision_info)
+            self.process_vision_info_func = process_vision_info
+            self.get_rope_index_func = get_rope_index_slowfast
+        else:
+            raise ValueError("cannot be here yet")
 
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "conversations")
@@ -267,4 +271,5 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
                 del state["dataframe"]
             return state
 
+        return self.__dict__.copy()
         return self.__dict__.copy()

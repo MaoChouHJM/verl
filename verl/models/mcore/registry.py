@@ -130,7 +130,7 @@ MODEL_WEIGHT_CONVERTER_REGISTRY: Dict[SupportedModel, Type] = {
 def get_supported_model(model_type: str) -> SupportedModel:
     import os
     if model_type == "KeyeForConditionalGeneration":
-        if os.environ.get("USE_KEYE_PREVIEW", "false").lower() == "true":
+        if os.environ.get("USE_SLOW_FAST", "false").lower() == "false":
             model_type = "KeyePreview"  
     try:
         return SupportedModel(model_type)
