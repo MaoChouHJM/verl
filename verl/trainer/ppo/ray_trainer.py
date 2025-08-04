@@ -37,7 +37,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto, DataProtoFuture
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -60,6 +60,7 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.workers.async_reward_manager import AsyncRewardWorkerManager
 
 WorkerType = Type[Worker]
 
@@ -865,6 +866,7 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
+        # create reward workers
         if self.use_rm_worker:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardWorker)
             rm_worker_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardWorker],
@@ -917,7 +919,8 @@ class RayPPOTrainer:
             self.rm_wg.init_model()
         if self.use_rm_worker:
             self.rm_worker_wg = all_wg['rm_worker']
-    
+            reward_worker_node_id = self.rm_worker_wg.init_model()
+
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
 
         self.actor_rollout_wg = all_wg["actor_rollout"]
@@ -935,6 +938,11 @@ class RayPPOTrainer:
             )
 
         self._report_timing_stat()
+
+        # initiate async reward worker manager
+        if self.use_rm_worker and self.config.reward_model.launch_reward_fn_async:
+            self.async_reward_manager = AsyncRewardWorkerManager(self.config, self.rm_worker_wg, self.reward_fn, self.val_reward_fn, reward_worker_node_id)
+
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
@@ -1266,25 +1274,35 @@ class RayPPOTrainer:
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
-                        elif not self.use_rm_worker:
-                            reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-                        else:
-                            batch_padded, pad_size = pad_dataproto_to_divisor(batch, self.rm_worker_wg.world_size)
-                            reward_proto = self.rm_worker_wg.compute_reward(batch_padded)
-                            reward_proto = unpad_dataproto(reward_proto, pad_size)
-                            reward_tensor = reward_proto.batch['reward_tensor']
-                            reward_extra_infos_dict = reward_proto.non_tensor_batch
+                            if self.use_rm_worker:
+                                batch_for_reward = deepcopy(batch)
+                                batch_padded, pad_size = pad_dataproto_to_divisor(batch_for_reward, self.rm_worker_wg.world_size)
+                                futures = self.async_reward_manager.compute_reward_async(batch_padded)
+
+                            else:
+                                future_reward = compute_reward_async.remote(batch, self.config, self.tokenizer)
+                        else: 
+                            if not self.use_rm_worker:
+                                reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
+                            else:
+                                batch_padded, pad_size = pad_dataproto_to_divisor(batch, self.rm_worker_wg.world_size)
+                                reward_proto = self.rm_worker_wg.compute_reward(batch_padded)
+                                reward_proto = unpad_dataproto(reward_proto, pad_size)
+                                reward_tensor = reward_proto.batch['reward_tensor']
+                                reward_extra_infos_dict = reward_proto.non_tensor_batch
 
 
                     # recompute old_log_probs
+
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                        entropy_agg = agg_loss(
+                            loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode
+                        )
+                        old_log_prob_metrics = {"actor/entropy_loss": entropy_agg.detach().item()}
                         metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
@@ -1321,6 +1339,11 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                        if self.use_reference_policy:
+                            # compute reference log_prob
+                            with marked_timer("ref", timing_raw):
+                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                batch = batch.union(ref_log_prob)
 
                     # compute values
                     if self.use_critic:
@@ -1328,11 +1351,19 @@ class RayPPOTrainer:
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                            if self.use_rm_worker:
+
+                                future_reward_proto = ray.get(futures)
+                                reward_proto = unpad_dataproto(DataProto.concat(future_reward_proto), pad_size)
+                                reward_tensor = reward_proto.batch['reward_tensor']
+                                reward_extra_infos_dict = reward_proto.non_tensor_batch
+                            else:
+                                reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:

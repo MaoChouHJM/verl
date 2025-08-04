@@ -10,6 +10,7 @@ import psutil
 import wandb
 import datetime
 import time
+import ray
 
 from verl import DataProto
 from verl.single_controller.base import Worker
@@ -23,6 +24,9 @@ class RewardWorker(Worker):
         self.reward_fn = reward_fn()
         self.val_reward_fn = val_reward_fn()
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        return ray.get_runtime_context().get_node_id()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_reward(self, data: DataProto):
