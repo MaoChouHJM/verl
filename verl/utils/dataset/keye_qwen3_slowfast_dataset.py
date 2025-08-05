@@ -82,7 +82,9 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
             self.process_vision_info_func = process_vision_info
             self.get_rope_index_func = get_rope_index_slowfast
         else:
-            raise ValueError("cannot be here yet")
+            from .keye_utils.keye_vl_utils import process_vision_info, get_rope_index
+            self.process_vision_info_func = process_vision_info
+            self.get_rope_index_func = get_rope_index
 
         self.cache_dir = os.path.expanduser(config.get("cache_dir", "~/.cache/verl/rlhf"))
         self.prompt_key = config.get("prompt_key", "conversations")
@@ -217,16 +219,29 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         # second_per_grid_ts isn't used for training, just for mrope
         row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
-        position_ids = self.get_rope_index_func(
-                input_ids=input_ids,
-                image_grid_thw=model_inputs.get("image_grid_thw"),
-                video_grid_thw=model_inputs.get("video_grid_thw"),
-                spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
-                image_token_id=self.hf_config.image_token_id,
-                video_token_id=self.hf_config.video_token_id,
-                vision_start_token_id=self.hf_config.vision_start_token_id,
-                fast_video_token_id=self.hf_config.fast_video_token_id
-            ).transpose(0,1)  # (bs, 3, seq_len)
+        if os.envrion.get("USE_SLOW_FAST", "false").lower() == "true":
+            position_ids = self.get_rope_index_func(
+                    input_ids=input_ids,
+                    image_grid_thw=model_inputs.get("image_grid_thw"),
+                    video_grid_thw=model_inputs.get("video_grid_thw"),
+                    spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+                    image_token_id=self.hf_config.image_token_id,
+                    video_token_id=self.hf_config.video_token_id,
+                    vision_start_token_id=self.hf_config.vision_start_token_id,
+                    fast_video_token_id=self.hf_config.fast_video_token_id
+                ).transpose(0,1)  # (bs, 3, seq_len)
+        else:
+            position_ids = self.get_rope_index_func(
+                    input_ids=input_ids,
+                    image_grid_thw=model_inputs.get("image_grid_thw"),
+                    video_grid_thw=model_inputs.get("video_grid_thw"),
+                    spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
+                    image_token_id=self.hf_config.image_token_id,
+                    video_token_id=self.hf_config.video_token_id,
+                    vision_start_token_id=self.hf_config.vision_start_token_id,
+                    tokens_per_second=self.hf_config.vision_config.tokens_per_second,
+                ).transpose(0,1)  # (bs, 3, seq_len)
+
 
         input_ids, attention_mask, position_ids = verl_F.postprocess_data(
             input_ids=input_ids,
