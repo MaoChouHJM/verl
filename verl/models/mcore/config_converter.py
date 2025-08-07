@@ -507,8 +507,8 @@ def hf_to_mcore_config_keye_qwen3(
         bias_activation_fusion=True,
         persist_layer_norm=True,
         bias_dropout_fusion=True,
-        recompute_granularity="selective",
-        recompute_modules=["core_attn", "mlp"],
+        #recompute_granularity="selective",
+        #recompute_modules=["core_attn", "mlp"],
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)

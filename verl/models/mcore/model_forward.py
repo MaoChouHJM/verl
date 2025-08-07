@@ -168,11 +168,11 @@ def gptmodel_forward_keye_qwen3(
 ):
     post_process = unwrap_model(model).post_process
     vp_stage = unwrap_model(model).vp_stage
-    # if not hasattr(gptmodel_forward_keye_qwen3, 'slowfast_padder'):
-    #     base_model_dir = unwrap_model(model).model_path
-    #     from transformers import AutoProcessor
-    #     processor = AutoProcessor.from_pretrained(base_model_dir)
-    #     gptmodel_forward_keye_qwen3.slowfast_padder = SlowFastVisionPadder(processor)
+    if not hasattr(gptmodel_forward_keye_qwen3, 'slowfast_padder'):
+        base_model_dir = unwrap_model(model).model_path
+        from transformers import AutoProcessor
+        processor = AutoProcessor.from_pretrained(base_model_dir, trust_remote_code=True)
+        gptmodel_forward_keye_qwen3.slowfast_padder = SlowFastVisionPadder(processor)
     
     if pack_seqs:
         batch_size, seq_len = attention_mask.shape[:2]
@@ -181,6 +181,7 @@ def gptmodel_forward_keye_qwen3(
             position_ids=position_ids,
             attention_mask=attention_mask,
             multi_modal_inputs=multi_modal_inputs,
+            slowfast_padder=gptmodel_forward_keye_qwen3.slowfast_padder,
             pre_process=True,
             image_token_id=unwrap_model(model).hf_config.image_token_id,
             video_token_id=unwrap_model(model).hf_config.video_token_id,
@@ -189,21 +190,22 @@ def gptmodel_forward_keye_qwen3(
         from megatron.core.packed_seq_params import PackedSeqParams
         packed_seq_params = PackedSeqParams(
                 qkv_format="thd",
-                cu_seqlens_q=batch["cu_seqlens"],
-                cu_seqlens_kv=batch["cu_seqlens"],
-                max_seqlen_q=batch["max_seqlen"],
-                max_seqlen_kv=batch["max_seqlen"],
+                cu_seqlens_q=batch["cu_seqlens"].cpu(),
+                cu_seqlens_kv=batch["cu_seqlens"].cpu(),
+                max_seqlen_q=batch["max_seqlen"].cpu(),
+                max_seqlen_kv=batch["max_seqlen"].cpu(),
             )
         vision_packed_seq_params = None
         if mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=vp_stage):
             if vp_stage is None or vp_stage == 0:
-                vision_packed_seq_params = PackedSeqParams(
-                    qkv_format="thd",
-                    cu_seqlens_q=batch["vision_cu_seqlens"],
-                    cu_seqlens_kv=batch["vision_cu_seqlens"],
-                    max_seqlen_q=batch["vision_max_seqlen"],
-                    max_seqlen_kv=batch["vision_max_seqlen"],
-                )
+                if 'vision_cu_seqlens' in batch:
+                    vision_packed_seq_params = PackedSeqParams(
+                        qkv_format="thd",
+                        cu_seqlens_q=batch["vision_cu_seqlens"].cpu(),
+                        cu_seqlens_kv=batch["vision_cu_seqlens"].cpu(),
+                        max_seqlen_q=batch["vision_max_seqlen"].cpu(),
+                        max_seqlen_kv=batch["vision_max_seqlen"].cpu(),
+                    )
 
         output_tensor = model(
             input_ids=batch.get("input_ids", None),
@@ -265,7 +267,7 @@ def gptmodel_forward_keye_qwen3_slowfast(
     if not hasattr(gptmodel_forward_keye_qwen3_slowfast, 'slowfast_padder'):
         base_model_dir = unwrap_model(model).model_path
         from transformers import AutoProcessor
-        processor = AutoProcessor.from_pretrained(base_model_dir)
+        processor = AutoProcessor.from_pretrained(base_model_dir, trust_remote_code=True)
         gptmodel_forward_keye_qwen3_slowfast.slowfast_padder = SlowFastVisionPadder(processor)
     
     if pack_seqs:
@@ -296,20 +298,22 @@ def gptmodel_forward_keye_qwen3_slowfast(
 
         if mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=vp_stage):
             if vp_stage is None or vp_stage == 0:
-                vision_packed_seq_params = PackedSeqParams(
-                    qkv_format="thd",
-                    cu_seqlens_q=batch["vision_cu_seqlens"],
-                    cu_seqlens_kv=batch["vision_cu_seqlens"],
-                    max_seqlen_q=batch["vision_max_seqlen"],
-                    max_seqlen_kv=batch["vision_max_seqlen"],
-                )
-                fast_vision_packed_seq_params = PackedSeqParams(
-                    qkv_format="thd",
-                    cu_seqlens_q=batch.get("fast_vision_cu_seqlens", None),
-                    cu_seqlens_kv=batch.get("fast_vision_cu_seqlens", None),
-                    max_seqlen_q=batch.get("fast_vision_max_seqlen", None),
-                    max_seqlen_kv=batch.get("fast_vision_max_seqlen", None),
-                )
+                if "vision_cu_seqlens" in vision_packed_seq_params:
+                    vision_packed_seq_params = PackedSeqParams(
+                        qkv_format="thd",
+                        cu_seqlens_q=batch["vision_cu_seqlens"],
+                        cu_seqlens_kv=batch["vision_cu_seqlens"],
+                        max_seqlen_q=batch["vision_max_seqlen"],
+                        max_seqlen_kv=batch["vision_max_seqlen"],
+                    )
+                if "fast_vision_cu_seqlens" in vision_packed_seq_params:
+                    fast_vision_packed_seq_params = PackedSeqParams(
+                        qkv_format="thd",
+                        cu_seqlens_q=batch.get("fast_vision_cu_seqlens", None),
+                        cu_seqlens_kv=batch.get("fast_vision_cu_seqlens", None),
+                        max_seqlen_q=batch.get("fast_vision_max_seqlen", None)),
+                        max_seqlen_kv=batch.get("fast_vision_max_seqlen", None)),
+                    )
 
         output_tensor = model(
             input_ids=batch.get("input_ids", None),

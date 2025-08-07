@@ -2,7 +2,7 @@ import torch
 from typing import Any, Dict, List, Optional, Tuple, Union
 from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
-from transformers import PreTrainedTokenizer, ProcessorMixin, AutoProcessor
+from transformers import PreTrainedTokenizer, ProcessorMixin, AutoProcessor, AutoConfig
 from copy import deepcopy
 
 
@@ -113,86 +113,6 @@ class SlowFastVisionPadder:
         )
 
         return inputs
-
-
-#def preprocess_packed_seqs( input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, cp_size: int = 1, cp_rank: int = 0,) -> tuple[torch.Tensor, PackedSeqParams]: """
-#    Preprocess packed sequences
-#    CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1
-#    gets second and second last chunks, and so on), this is for load balancing with causal masking.
-#    See https://github.com/NVIDIA/TransformerEngine/issues/1368
-#    """
-#    batch_size = input_ids.shape[0]
-#
-#    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-#    #tp_size = mpu.get_tensor_model_parallel_world_size()
-#    #cp_size = mpu.get_context_parallel_world_size()
-#    #cp_rank = mpu.get_context_parallel_rank()
-#    tp_size = 1
-#    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
-#
-#    pad_size = (align_size - seqlens_in_batch % align_size) % align_size
-#    seqlens_in_batch_padded = seqlens_in_batch + pad_size
-#    cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
-#    cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
-#    cu_seqlens_padded = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
-#    cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
-#    max_seqlen_in_batch = seqlens_in_batch_padded.max().item()
-#
-#    shape = list(input_ids.shape[1:])
-#    if len(shape) == 1:
-#        shape[0] = seqlens_in_batch_padded.sum().item() // cp_size
-#    elif len(shape) == 2:  # mrope
-#        shape[-1] = seqlens_in_batch_padded.sum().item() // cp_size
-#    else:
-#        raise ValueError(f'shape can only be 2-D ids or 3-D mrope position_ids.')
-#
-#    if pre_process:
-#        input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
-#        for i in range(batch_size):
-#            if cp_size <= 1:
-#                seqlen = seqlens_in_batch[i]
-#                input_ids_rmpad[..., cu_seqlens_padded[i] : cu_seqlens_padded[i] + seqlen] = input_ids[i, ...,  attention_mask[i].bool()]
-#                continue
-#            seqlen = seqlens_in_batch_padded[i] // cp_size
-#            half_seqlen = seqlen // 2
-#            start_idx = cu_seqlens_padded[i] // cp_size
-#            # split to 2 chunks
-#            d = input_ids[i, ...,  attention_mask[i].bool()]
-#            input_ids_rmpad[..., start_idx : start_idx + half_seqlen] = d[..., 
-#                half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
-#            ]
-#
-#            remain_start = seqlens_in_batch_padded[i] - half_seqlen * (cp_rank + 1)
-#            remain_end = seqlens_in_batch_padded[i] - half_seqlen * cp_rank
-#            if len(shape) == 1:
-#                d_seq_length = d.shape[0]
-#            elif len(shape) == 2:
-#                d_seq_length = d.shape[-1]
-#            else:
-#                raise ValueError(f'shape can only be 2-D ids or 3-D mrope position_ids.')
-#            remain_end = min(remain_end, d_seq_length)
-#            remain_len = remain_end - remain_start
-#            dbg_a  = d[..., remain_start:remain_end]
-#            dbg_b  = input_ids_rmpad[..., start_idx + half_seqlen : start_idx + half_seqlen + remain_len]
-#            if remain_len > 0:
-#                input_ids_rmpad[..., start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[...,
-#                    remain_start:remain_end
-#                ]
-#
-#    packed_seq_params = PackedSeqParams(
-#        qkv_format="thd",
-#        cu_seqlens_q=cu_seqlens_padded,
-#        max_seqlen_q=max_seqlen_in_batch,
-#        cu_seqlens_kv=cu_seqlens_padded,
-#        max_seqlen_kv=max_seqlen_in_batch,
-#        cu_seqlens_q_padded=cu_seqlens_padded,
-#        cu_seqlens_kv_padded=cu_seqlens_padded,
-#    )
-#    if pre_process:
-#        return input_ids_rmpad.unsqueeze(0), packed_seq_params
-#    else:
-#        return input_ids, packed_seq_params
-
 
 def rmpad_and_cp_padding(input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, dbg_cp_size: int = 1) -> tuple[torch.Tensor, PackedSeqParams]: 
     """
@@ -446,7 +366,7 @@ def convert_sample_to_verl_input(samples):
     return torch.cat([s['input_ids'] for s in samples], dim=0), torch.cat([s['position_ids'] for s in samples], dim=1).transpose(0, 1), attention_mask, multi_modal_input
 
 
-if __name__ == "__main__":
+def test_cp():
     hf_processor = AutoProcessor.from_pretrained("/mmu_mllm_hdd_2/zhouyang12/models/Keye-8B-demo_hf_vit_rope_slowfast_0714",
                                                  trust_remote_code=True)
     slowfast_padder = SlowFastVisionPadder(hf_processor)
@@ -486,39 +406,129 @@ if __name__ == "__main__":
         is_equal_0 = torch.all(batch_cp_0[k] == pack_output_0[k])
         is_equal_1 = torch.all(batch_cp_1[k] == pack_output_1[k])
         print(f'{k=}\n{is_equal_0=} {is_equal_1=}')
-        #kif not is_equal:
-        #k    print(f"{k=} {is_equal=} {batch[k].shape=} {pack_output[k].shape=}")
-        #k    torch.save({k: batch[k]}, f"/nlp_group/huangjiaming/logits-distill/{k}.pth")
 
+def convert_swift_input_to_verl_input(samples):
+    MAX_PROMPT_LENGTH = 1024 * 3
+    MAX_RESPONSE_LENGTH = 1024 * 5
+    hf_config = AutoConfig.from_pretrained("/hetu_group/jky/misc/tools/swift_20250508/playground/keye_8b_20250613/rl/20250703.1.r1reward/global_step80_hf", trust_remote_code=True)
+    from collections import defaultdict
+    import numpy as np
+    from verl import DataProto
+
+    dp_rank = mpu.get_data_parallel_rank()
+    print(f'{dp_rank=}')
+    path = f"/hetu_group/jky/misc/tools/swift_20250508_0528/playground/keye_8b_20250613/rl/20250805.1.rft__qwen2_5_vl_72b_v2__trainvit__fromtkdhjrft__math__fromrl80/tools/outputs_2nd/rank{dp_rank}_globalstep0_debug_inputs.pt"
+    samples = torch.load(path, map_location='cpu')
+    batch_size = 1
+    valid_resp_length = samples['inputs']['logits_to_keep']
+    input_ids = samples['inputs']['input_ids']
+    old_log_probs = samples['inputs']['old_per_token_logps']
+    advantages = samples['inputs']['advantages']
+    from verl.utils.dataset.keye_utils.keye_vl_utils import get_rope_index
+    position_ids, _ = get_rope_index(
+        input_ids,
+        samples['inputs'].get('image_grid_thw', None),
+        samples['inputs'].get('video_grid_thw', None),
+        spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+        image_token_id=hf_config.image_token_id,
+        video_token_id=hf_config.video_token_id,
+        vision_start_token_id=hf_config.vision_start_token_id,
+        tokens_per_second=hf_config.vision_config.tokens_per_second,
+    )
+    attention_mask = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+    new_input_ids = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+    new_response = new_input_ids[:, -MAX_RESPONSE_LENGTH:]
+    new_position_ids = torch.zeros((3, batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+    new_old_log_probs = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+
+    new_input_ids[0, MAX_PROMPT_LENGTH + valid_resp_length - input_ids.shape[-1] : \
+                      MAX_PROMPT_LENGTH + valid_resp_length] = input_ids[0]
+
+    new_position_ids[:, 0, MAX_PROMPT_LENGTH + valid_resp_length - position_ids.shape[-1] : \
+                      MAX_PROMPT_LENGTH + valid_resp_length] = position_ids[:, 0, :]
+    attention_mask[0, MAX_PROMPT_LENGTH + valid_resp_length - input_ids.shape[-1] : \
+                      MAX_PROMPT_LENGTH + valid_resp_length] = 1
+    new_old_log_probs[0, MAX_PROMPT_LENGTH : MAX_PROMPT_LENGTH + old_log_probs.shape[-1]] = \
+                      old_log_probs[0]
+       
+    VISION_KEYS = ['pixel_values', 'image_grid_thw', 'pixel_values_videos',
+                   'video_grid_thw', 'fast_pixel_values_videos', 'fast_video_grid_thw']
     
-
-    #input_ids = torch.zeros(3,6)
-    #input_ids[0, :2] = torch.arange(2)
-    #input_ids[1, :3] = torch.arange(3)
-    #input_ids[2, :4] = torch.arange(4)
-    #position_ids =torch.zeros(3,3,6)  # [bs, 3, prompt_length + response_length]
-    #position_ids[0,:,:2] = torch.arange(2)
-    #position_ids[1,:,:3] = torch.arange(3)
-    #position_ids[2,:,:4] = torch.arange(4)
-    #
-    #attention_mask = torch.zeros(3, 6).int()
-    #attention_mask[0,:2] = 1
-    #attention_mask[1,:3] = 1
-    #attention_mask[2,:4] = 1
-    #print(f'{input_ids=}')
-
-    #print(f'=====================cp_rank:0==========')
-    #position_ids_rmpad, packed_seq_params = preprocess_packed_seqs(position_ids, attention_mask, True, cp_size=2, cp_rank=0)
-    #input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, True, cp_size=2, cp_rank=0)
-    #print(f"{input_ids_rmpad=}")
-    #print(f"{position_ids_rmpad=}")
-    #print(f"{packed_seq_params=}")
-    #print(f'=====================cp_rank:1==========')
-    #position_ids_rmpad, packed_seq_params = preprocess_packed_seqs(position_ids, attention_mask, True, cp_size=2, cp_rank=1)
-    #input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, True, cp_size=2, cp_rank=1)
-    #print(f"{input_ids_rmpad.shape=}")
-    #print(f"{position_ids_rmpad.shape=}")
-    #print(f"{packed_seq_params=}")
-
+    multi_modal_input = {}
+    for key in VISION_KEYS:
+        if key in samples['inputs']:
+            multi_modal_input[key] = samples['inputs'][key]
     
+    tensors = defaultdict(list)
+    non_tensors = defaultdict(list)
+    tensors['responses'] = new_response
+    tensors['input_ids'] = new_input_ids
+    tensors['attention_mask'] = attention_mask
+    tensors['position_ids'] = new_position_ids.transpose(0, 1)
+    tensors['old_log_probs'] = new_old_log_probs
+    tensors['advantages'] = advantages
+    non_tensors['multi_modal_inputs'] = np.array([multi_modal_input], dtype=object)
+  
+    batch: DataProto = DataProto.from_single_dict({**tensors, **non_tensors})
+    # original verl data proto select
+    select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+    #if self.config.use_kl_loss:
+    #    select_keys.append("ref_log_prob")
+    #self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
+    data = batch.select(select_keys, ["multi_modal_inputs"])
+    return data.make_iterator(
+        mini_batch_size=self.config.ppo_mini_batch_size,
+        epochs=self.config.ppo_epochs,
+        seed=self.config.data_loader_seed,
+        dataloader_kwargs={"shuffle": self.config.shuffle},
+    )
+
+#
+#
+#    MAX_PROMPT_LENGTH = 1024 * 3
+#    MAX_RESPONSE_LENGTH = 1024 * 5
+#    from collections import defaultdict
+#    batch_size = 1
+#    valid_resp_length = samples['inputs']['logits_to_keep']
+#    input_ids = samples['inputs']['input_ids']
+#    hf_config = AutoConfig.from_pretrained("/hetu_group/jky/misc/tools/swift_20250508/playground/keye_8b_20250613/rl/20250703.1.r1reward/global_step80_hf", trust_remote_code=True)
+#    from verl.utils.dataset.keye_utils.keye_vl_utils import get_rope_index
+#    position_ids, _ = get_rope_index(
+#        input_ids,
+#        samples['inputs'].get('image_grid_thw', None),
+#        samples['inputs'].get('video_grid_thw', None),
+#        spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+#        image_token_id=hf_config.image_token_id,
+#        video_token_id=hf_config.video_token_id,
+#        vision_start_token_id=hf_config.vision_start_token_id,
+#        tokens_per_second=hf_config.vision_config.tokens_per_second,
+#    )
+#    attention_mask = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+#    new_input_ids = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+#    new_response = new_input_ids[:, -MAX_RESPONSE_LENGTH:]
+#    new_position_ids = torch.zeros((3, batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+#
+#    new_input_ids[0, MAX_PROMPT_LENGTH + valid_resp_length - input_ids.shape[-1] : \
+#                      MAX_PROMPT_LENGTH + valid_resp_length] = input_ids[0]
+#    new_position_ids[:, 0, MAX_PROMPT_LENGTH + valid_resp_length - position_ids.shape[-1] : \
+#                      MAX_PROMPT_LENGTH + valid_resp_length] = position_ids[:, 0, :]
+#    attention_mask[0, MAX_PROMPT_LENGTH + valid_resp_length - input_ids.shape[-1] : \
+#                      MAX_PROMPT_LENGTH + valid_resp_length] = 1
+#       
+#    VISION_KEYS = ['pixel_values', 'image_grid_thw', 'pixel_values_videos',
+#                   'video_grid_thw', 'fast_pixel_values_videos', 'fast_video_grid_thw']
+#    
+#    multi_modal_input = defaultdict(list)
+#    for key in VISION_KEYS:
+#        if key in samples['inputs']:
+#            multi_modal_input[key].append(samples['inputs'][key])
+#    
+#    for k in multi_modal_input.keys():
+#        multi_modal_input[k] = torch.cat(multi_modal_input[k], dim=0)
+#
+#    return new_input_ids, new_position_ids.transpose(0, 1), attention_mask, multi_modal_input
+
+if __name__ == "__main__":
+    swift_input = torch.load("/hetu_group/jky/misc/tools/swift_20250508_0528/playground/keye_8b_20250613/rl/20250805.1.rft__qwen2_5_vl_72b_v2__trainvit__fromtkdhjrft__math__fromrl80/tools/outputs_2nd/rank0_globalstep0_debug_inputs.pt")
+    verl_input = convert_swift_input_to_verl_input(swift_input)

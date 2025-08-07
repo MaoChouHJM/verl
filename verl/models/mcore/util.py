@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -213,7 +214,8 @@ class SlowFastVisionPadder:
     def __init__(self, processor):
 
         # 这个padder这里使用了非slowfast版本的get_rope_index,这不重要,因为pad是不会用来计算损失的
-        from examples.keye.processors.utils_slowfast import get_rope_index
+        from  verl.utils.dataset.keye_utils.keye_vl_utils import get_rope_index
+        #from examples.keye.processors.utils_slowfast import get_rope_index
         self.get_rope_index = get_rope_index
         self.processor = processor
         self.patch_size = processor.image_processor.patch_size
@@ -221,12 +223,14 @@ class SlowFastVisionPadder:
         assert self.merge_size == 2, f"SlowFastVisionPadder does not support self.merge_size({self.merge_size}) != 2"
         self.image_pad = processor.tokenizer.encode("<|image_pad|>")[0]
         self.video_pad = processor.tokenizer.encode("<|video_pad|>")[0]
-        fast_video_pad = processor.tokenizer.encode("<|fast_video_pad|>")
-        assert len(fast_video_pad) == 1, "Decode fast_video_pad failed: {}".format(fast_video_pad)
-        self.fast_video_pad = fast_video_pad[0]
         self.vision_start = processor.tokenizer.encode("<|vision_start|>")[0]
         self.vision_end = processor.tokenizer.encode("<|vision_end|>")[0]
         self.frame = processor.tokenizer.encode("<|frame|>")[0]
+        if os.environ.get('USE_SLOW_FAST', "false").lower() == "true":
+            fast_video_pad = processor.tokenizer.encode("<|fast_video_pad|>")
+            assert len(fast_video_pad) == 1, "Decode fast_video_pad failed: {}".format(fast_video_pad)
+            self.fast_video_pad = fast_video_pad[0]
+
 
     def __call__(self, packed_pixel_values, packed_pixel_values_videos, packed_fast_pixel_values_videos):
           paddings = []
@@ -237,33 +241,37 @@ class SlowFastVisionPadder:
           if n_pixel_values % 8 == 4: paddings.append(self.gen_img_pad(n_merged_slow_tokens=1))
           elif n_pixel_values == 0: paddings.append(self.gen_img_pad(n_merged_slow_tokens=2))
 
-          paddings.append(
-            self.gen_video_pad(
-              n_merged_slow_tokens=1 if n_pixel_values_videos % 8 == 4 else 2, 
-              n_merged_fast_tokens=1 if n_fast_pixel_values_videos % 8 == 4 else 2, 
+          
+          if os.environ.get('USE_SLOW_FAST', "false").lower() == "true":
+              paddings.append(
+                self.gen_video_pad(
+                  n_merged_slow_tokens=1 if n_pixel_values_videos % 8 == 4 else 2, 
+                  n_merged_fast_tokens=1 if n_fast_pixel_values_videos % 8 == 4 else 2, 
+                  )
               )
-          )
 
           return paddings
 
     def gen_img_pad(self, n_merged_slow_tokens=1):
         input_ids = [self.vision_start] + [self.image_pad] * n_merged_slow_tokens + [self.vision_end]
         inputs = {
-            "input_ids": torch.tensor([input_ids], dtype=torch.int64),
-            "attention_mask": torch.tensor([[1] * (n_merged_slow_tokens + 2)], dtype=torch.int64),
-            "pixel_values": torch.rand(n_merged_slow_tokens * 4, 3, self.patch_size, self.patch_size).float(),
-            "image_grid_thw": torch.tensor([[1, 2, n_merged_slow_tokens * 2]], dtype=torch.int64),
-            "loss_mask": torch.zeros(len(input_ids), dtype=torch.int64),
+            "input_ids": torch.tensor([input_ids], dtype=torch.int64).cuda(),
+            "attention_mask": torch.tensor([[1] * (n_merged_slow_tokens + 2)], dtype=torch.int64).cuda(),
+            "pixel_values": torch.rand(n_merged_slow_tokens * 4, 3, self.patch_size, self.patch_size).float().cuda(),
+            "image_grid_thw": torch.tensor([[1, 2, n_merged_slow_tokens * 2]], dtype=torch.int64).cuda(),
+            "loss_mask": torch.zeros(len(input_ids), dtype=torch.int64).cuda(),
         }
-        inputs["position_ids"] = self.get_rope_index(
+        inputs["position_ids"],_ = self.get_rope_index(
           inputs["input_ids"],
           image_grid_thw=inputs.get("image_grid_thw"),
           video_grid_thw=inputs.get("video_grid_thw"),
           spatial_merge_size=self.merge_size,
           image_token_id=self.image_pad,
           video_token_id=self.video_pad,
-          vision_start_token_id=self.vision_start
+          vision_start_token_id=self.vision_start,
+          tokens_per_second=2,
         )
+        inputs["position_ids"] = inputs["position_ids"].cuda()
 
         return inputs
 
@@ -291,23 +299,26 @@ class SlowFastVisionPadder:
         # video_inputs = (
         input_ids = [self.vision_start] + [self.video_pad] * n_merged_slow_tokens + [self.fast_video_pad] * n_merged_fast_tokens + [self.vision_end]
         inputs = {
-            "input_ids": torch.tensor([input_ids], dtype=torch.int64),
-            "attention_mask": torch.tensor([[1] * len(input_ids)], dtype=torch.int64),
-            "video_grid_thw": torch.tensor([[1, 2, n_merged_slow_tokens * 2]], dtype=torch.int64),
-            "fast_video_grid_thw": torch.tensor([[1, 2, n_merged_fast_tokens * 2]], dtype=torch.int64),
-            "fast_pixel_values_videos": torch.rand(n_merged_fast_tokens * 4, 3, self.patch_size, self.patch_size).float(),
-            "pixel_values_videos": torch.rand(n_merged_slow_tokens * 4, 3, self.patch_size, self.patch_size).float(),
-            "loss_mask": torch.zeros(len(input_ids), dtype=torch.int64),
+            "input_ids": torch.tensor([input_ids], dtype=torch.int64).cuda(),
+            "attention_mask": torch.tensor([[1] * len(input_ids)], dtype=torch.int64).cuda(),
+            "video_grid_thw": torch.tensor([[1, 2, n_merged_slow_tokens * 2]], dtype=torch.int64).cuda(),
+            "fast_video_grid_thw": torch.tensor([[1, 2, n_merged_fast_tokens * 2]], dtype=torch.int64).cuda(),
+            "fast_pixel_values_videos": torch.rand(n_merged_fast_tokens * 4, 3, self.patch_size, self.patch_size).float().cuda(),
+            "pixel_values_videos": torch.rand(n_merged_slow_tokens * 4, 3, self.patch_size, self.patch_size).float().cuda(),
+            "loss_mask": torch.zeros(len(input_ids), dtype=torch.int64).cuda(),
         }
-        inputs["position_ids"] = self.get_rope_index(
+        inputs["position_ids"],_ = self.get_rope_index(
           inputs["input_ids"],
           image_grid_thw=inputs.get("image_grid_thw"),
           video_grid_thw=inputs.get("video_grid_thw"),
           spatial_merge_size=self.merge_size,
           image_token_id=self.image_pad,
           video_token_id=self.video_pad,
-          vision_start_token_id=self.vision_start
+          vision_start_token_id=self.vision_start,
+          tokens_per_second=2,
         )
+
+        inputs["position_ids"] = inputs["position_ids"].cuda()
 
         return inputs
 
@@ -492,17 +503,12 @@ def keye_slowfast_preprocess_packed_seq(
                 numel = thw[0] * thw[1] * thw[2]
                 cu_seqlens.append(cu_seqlens[-1] + numel)
                 max_seqlen = max(max_seqlen, numel)
-                position_ids.append(torch.arange(numel) % (numel / thw.size(0)))
+                position_ids.append(torch.arange(numel, device=thw.device) % (numel / thw.size(0)))
             return (
                 torch.tensor(cu_seqlens, dtype=torch.int32),
                 max_seqlen,
                 torch.concat(position_ids, dim=0),
             )
-
-        vision_seq_params = _get_seq_params(packed_vision_grid_thw)
-        batch["vision_cu_seqlens"] = vision_seq_params[0]
-        batch["vision_max_seqlen"] = vision_seq_params[1]
-        batch["vision_position_ids"] = vision_seq_params[2]
 
         def get_vision_mask_index(input_ids, mask):
             result = torch.full(input_ids.shape, -1, dtype=torch.int32)
@@ -510,11 +516,16 @@ def keye_slowfast_preprocess_packed_seq(
             result[mask] = torch.arange(num_mask, dtype=torch.int32)
             return result
 
-        batch["vision_mask_index"] = get_vision_mask_index(
-            packed_input_ids,
-            (packed_input_ids == image_token_id) | (packed_input_ids == video_token_id)
-        )
-        assert (batch["vision_mask_index"] != -1).sum().item() * 4 == batch["vision_data"].shape[0]
+        if packed_vision_data is not None:
+            vision_seq_params = _get_seq_params(packed_vision_grid_thw)
+            batch["vision_cu_seqlens"] = vision_seq_params[0]
+            batch["vision_max_seqlen"] = vision_seq_params[1]
+            batch["vision_position_ids"] = vision_seq_params[2]
+            batch["vision_mask_index"] = get_vision_mask_index(
+                packed_input_ids,
+                (packed_input_ids == image_token_id) | (packed_input_ids == video_token_id)
+            )
+            assert (batch["vision_mask_index"] != -1).sum().item() * 4 == batch["vision_data"].shape[0]
 
         if fast_packed_vision_data is not None:
             batch["fast_vision_data"] = fast_packed_vision_data

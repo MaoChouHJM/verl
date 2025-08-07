@@ -349,7 +349,11 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
             KeyeModelSlowFast, Projector, SiglipVisionModel)
         
         args = self.hf_config
-        args.vision_rope_theta = self.hf_config.vision_config.rope_theta
+        if not hasattr(self.hf_config.vision_config, "rope_thea"):
+            args.vision_rope_theta = 10000
+        else:
+            args.vision_rope_theta = self.hf_config.vision_config.rope_theta
+
         vision_config = get_vision_model_config(args, tfconfig)
         vision_transformer_layer_spec = get_vision_model_spec()
 
@@ -366,15 +370,16 @@ class KeyeQwen3SlowFastModel(BaseModelInitializer):
             model_path: str,
             transformer_layer_spec: ModuleSpec,
             vision_config: VisionTransformerConfig,
-            fast_vision_config: VisionTransformerConfig,
             vision_layer_spec: ModuleSpec,
-            fast_vision_layer_spec: ModuleSpec,
+            fast_vision_config: Optional[VisionTransformerConfig] = None,
+            fast_vision_layer_spec: Optional[ModuleSpec] = None,
             pre_process: bool = True,
             post_process: bool = True,
             mtp_block_spec: Optional[ModuleSpec] = None,
             vp_stage: Optional[int] = None,
         ):
            super(KeyeModelSlowFast, self).__init__(config=transformer_config)
+           self.hf_config = hf_config
            self.config = transformer_config
            self.vision_config = vision_config
            self.model_path = model_path
@@ -466,7 +471,10 @@ class KeyeQwen3Model(BaseModelInitializer):
                                                           SiglipVisionModel)
 
         args = self.hf_config
-        args.vision_rope_theta = self.hf_config.vision_config.rope_theta
+        if not hasattr(self.hf_config.vision_config, "rope_thea"):
+            args.vision_rope_theta = 10000
+        else:
+            args.vision_rope_theta = self.hf_config.vision_config.rope_theta
         vision_config = get_vision_model_config(args, tfconfig)
         vision_transformer_layer_spec = get_vision_model_spec()
 
@@ -483,15 +491,14 @@ class KeyeQwen3Model(BaseModelInitializer):
             model_path: str,
             transformer_layer_spec: ModuleSpec,
             vision_config: VisionTransformerConfig,
-            fast_vision_config: VisionTransformerConfig,
             vision_layer_spec: ModuleSpec,
-            fast_vision_layer_spec: ModuleSpec,
             pre_process: bool = True,
             post_process: bool = True,
             mtp_block_spec: Optional[ModuleSpec] = None,
             vp_stage: Optional[int] = None,
         ):
            super(KeyeModel, self).__init__(config=transformer_config)
+           self.hf_config = hf_config
            self.config = transformer_config
            self.vision_config = vision_config
            self.model_path = model_path

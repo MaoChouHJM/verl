@@ -544,6 +544,47 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         get_torch_device().empty_cache()
         return output
 
+    #@register(dispatch_mode=Dispatch.MEGATRON_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    @GPUMemoryLogger(role="update_actor", logger=logger)
+    @DistProfiler.annotate(color="red")
+    def debug_update_actor(self):
+        assert self._is_actor
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+            log_gpu_memory_usage("After load actor params and grad during update_actor", logger=logger)
+        if self._is_offload_optimizer:
+            load_megatron_optimizer(self.actor_optimizer)
+            log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
+
+        with self.timing_record('update_actor/make_minibatch_iterator'):
+            dataloader = self.actor.debug_make_minibatch_iterator()
+        with self.timing_record('update_actor/update_policy'), Timer(name="update_policy", logger=None) as timer:
+            metrics = self.actor.update_policy(dataloader=dataloader)
+        delta_time = timer.last
+        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+        metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+        from verl.utils.megatron.optimizer import get_megatron_last_lr
+
+        metrics["actor/lr"] = get_megatron_last_lr(self.actor_optimizer)
+        self.actor_optimizer_scheduler.step(1)
+
+        # TODO: here, we should return all metrics
+        output = DataProto(meta_info={"metrics": metrics})
+        output = output.to("cpu")
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+            log_gpu_memory_usage("After offload actor params and grad during update_actor", logger=logger)
+        if self._is_offload_optimizer:
+            offload_megatron_optimizer(self.actor_optimizer)
+            log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
+
+        get_torch_device().empty_cache()
+        return output
+
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
     @DistProfiler.annotate(color="red")

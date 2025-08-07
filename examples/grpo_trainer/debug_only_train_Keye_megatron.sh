@@ -43,10 +43,13 @@ export HYDRA_FULL_ERROR=1
     
    
 
-python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
-    ++user_custom_env.USE_SLOW_FAST='false' \
+python3 -m verl.trainer.only_train_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
+    ++user_custom_env.USE_SLOW_FAST="FALSE" \
     ++user_custom_env.MIN_PIXELS=1024 \
     ++user_custom_env.MAX_PIXELS=1310720 \
+    ++user_custom_env.CUDNN_LOGERR_DBG=1 \
+    ++user_custom_env.CUDNN_LOGDEST_DBG=stderr \
+    ++user_custom_env.CUDA_LAUNCH_BLOCKING=1 \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
@@ -59,11 +62,11 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.model.path=$LLM \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=1 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.load_weight=True \
+    actor_rollout_ref.actor.load_weight=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.mode=$rollout_mode \

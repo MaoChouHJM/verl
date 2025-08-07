@@ -93,7 +93,7 @@ MODEL_INITIALIZER_REGISTRY: Dict[SupportedModel, Type[BaseModelInitializer]] = {
     SupportedModel.QWEN3_MOE: Qwen3MoEModel,
     SupportedModel.QWEN2_5_VL: Qwen25VLModel,
     SupportedModel.KEYE: KeyeQwen3SlowFastModel,
-    SupportedModel.KEYE_PREVIEW: KeyeQwen3Model,
+    SupportedModel.KEYE_PREVIEW: KeyeQwen3SlowFastModel,
 }
 
 # Registry for model forward functions

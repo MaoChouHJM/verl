@@ -304,6 +304,119 @@ class MegatronPPOActor(BasePPOActor):
             dataloader_kwargs={"shuffle": self.config.shuffle},
         )
 
+    def debug_make_minibatch_iterator(self) -> Iterable[DataProto]:
+        """Make minibatch iterator for updating the actor
+
+        Args:
+            data (DataProto): a DataProto containing keys
+
+                ``input_ids``: tensor of shape [batch_size, sequence_length]. torch.int64, where
+                ``sequence_length = prompt_length + response_length``
+
+                ``attention_mask``: tensor of shape [batch_size, sequence_length]. torch.int64
+
+                ``position_ids``: tensor of shape [batch_size, sequence_length]. torch.int64
+
+                ``responses``: tensor of shape [batch_size, response_length]. torch.int64. Note that
+                responses = input_ids[:, -response_length:]
+
+                ``old_log_probs``: tensor of shape [batch_size, response_length]. torch.float32. The log probability
+                of responses.
+
+                ``advantages``: tensor of shape [batch_size, response_length]. torch.float32. The advantages of
+                responses.
+                See PPO paper for details. https://arxiv.org/abs/1707.06347
+
+        Returns:
+
+        """
+        from transformers import AutoConfig
+
+        MAX_PROMPT_LENGTH = 1024 * 3
+        MAX_RESPONSE_LENGTH = 1024 * 6
+        hf_config = AutoConfig.from_pretrained("/hetu_group/jky/misc/tools/swift_20250508/playground/keye_8b_20250613/rl/20250703.1.r1reward/global_step80_hf", trust_remote_code=True)
+        from collections import defaultdict
+        import numpy as np
+        from verl import DataProto
+    
+        dp_rank = mpu.get_data_parallel_rank()
+        print(f'{dp_rank=}')
+        path = f"/hetu_group/jky/misc/tools/swift_20250508_0528/playground/keye_8b_20250613/rl/20250805.1.rft__qwen2_5_vl_72b_v2__trainvit__fromtkdhjrft__math__fromrl80/tools/outputs_2nd/rank{dp_rank}_globalstep0_debug_inputs.pt"
+        samples = torch.load(path, map_location='cpu')
+        batch_size = 1
+        valid_resp_length = samples['inputs']['logits_to_keep']
+        input_ids = samples['inputs']['input_ids']
+        old_log_probs = samples['inputs']['old_per_token_logps']
+        advantages = samples['inputs']['advantages']
+        from verl.utils.dataset.keye_utils.keye_vl_utils import get_rope_index
+        position_ids, _ = get_rope_index(
+            input_ids,
+            samples['inputs'].get('image_grid_thw', None),
+            samples['inputs'].get('video_grid_thw', None),
+            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+            image_token_id=hf_config.image_token_id,
+            video_token_id=hf_config.video_token_id,
+            vision_start_token_id=hf_config.vision_start_token_id,
+            tokens_per_second=hf_config.vision_config.tokens_per_second,
+        )
+        attention_mask = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+        new_input_ids = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+        new_response = new_input_ids[:, -MAX_RESPONSE_LENGTH:]
+        new_position_ids = torch.zeros((3, batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+        new_old_log_probs = torch.zeros((batch_size, MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH), dtype=torch.int32)
+    
+        try:
+            new_input_ids[0, MAX_PROMPT_LENGTH + valid_resp_length - input_ids.shape[-1] : \
+                          MAX_PROMPT_LENGTH + valid_resp_length] = input_ids[0]
+        except Exception as e:
+            raise RuntimeError(f'{path=}')
+    
+        new_position_ids[:, 0, MAX_PROMPT_LENGTH + valid_resp_length - position_ids.shape[-1] : \
+                          MAX_PROMPT_LENGTH + valid_resp_length] = position_ids[:, 0, :]
+        attention_mask[0, MAX_PROMPT_LENGTH + valid_resp_length - input_ids.shape[-1] : \
+                          MAX_PROMPT_LENGTH + valid_resp_length] = 1
+        new_old_log_probs[0, MAX_PROMPT_LENGTH : MAX_PROMPT_LENGTH + old_log_probs.shape[-1]] = \
+                          old_log_probs[0]
+           
+        VISION_KEYS = ['pixel_values', 'image_grid_thw', 'pixel_values_videos',
+                       'video_grid_thw', 'fast_pixel_values_videos', 'fast_video_grid_thw']
+        
+        multi_modal_input = {}
+        for key in VISION_KEYS:
+            if key in samples['inputs']:
+                multi_modal_input[key] = samples['inputs'][key].cuda()
+        
+        tensors = defaultdict(list)
+        non_tensors = defaultdict(list)
+        tensors['responses'] = new_response.cuda()
+        tensors['input_ids'] = new_input_ids.cuda()
+        tensors['attention_mask'] = attention_mask.cuda()
+        tensors['position_ids'] = new_position_ids.transpose(0, 1).cuda()
+        tensors['old_log_probs'] = new_old_log_probs.cuda()
+        tensors['advantages'] = advantages.cuda()
+        non_tensors['multi_modal_inputs'] = np.array([multi_modal_input], dtype=object)
+      
+        data: DataProto = DataProto.from_single_dict({**tensors, **non_tensors})
+
+
+        # original verl data proto select
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+        if self.config.use_kl_loss:
+            select_keys.append("ref_log_prob")
+        self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        if self.has_multi_modal_inputs:
+            data = data.select(select_keys, ["multi_modal_inputs"])
+        else:
+            raise RuntimeError(f'{path=}')
+            data = data.select(batch_keys=select_keys)
+        return data.make_iterator(
+            mini_batch_size=self.config.ppo_mini_batch_size,
+            epochs=self.config.ppo_epochs,
+            seed=self.config.data_loader_seed,
+            dataloader_kwargs={"shuffle": self.config.shuffle},
+        )
+
+
     def debug_forward_batch(
         self,
         forward_only=True,
@@ -615,7 +728,7 @@ class MegatronPPOActor(BasePPOActor):
                     )
             responses = batch["responses"]
             response_length = responses.size(1)
-            label = copy.deepcopy(position_ids)
+            label = copy.deepcopy(input_ids)
             label[:, -response_length - 1 : -1] = responses
             label_mask = copy.deepcopy(attention_mask)
             label_mask[:, : -response_length - 1] = False
