@@ -43,6 +43,10 @@ def _init_args():
     args = parser.parse_args()
     return args
 
+def _print_params(module, prefix=" "):
+    """打印模块的参数信息"""
+    for p_name, param in module.named_parameters():
+        print(f"{p_name}, {param.shape}")
 
 def test_conversion(megatron_model_provider, tfconfig, output_path, model):
     ########### test ###########
@@ -160,100 +164,158 @@ def safe_copy(
     return src_tensor.numel()
 
 def convert_checkpoint_from_transformers_to_megatron_keye_qwen3(hfmodel, mgmodel, hf_config):
-    mgmodel = mgmodel.bfloat16()
-    hfmodel = hfmodel.bfloat16()
-    num_attention_heads = hf_config.num_attention_heads
-    num_query_groups = hf_config.num_key_value_heads
-    hidden_size = hf_config.hidden_size
+    print("==== Hugging face model ====")
+    _print_params(hfmodel)
+    print("==== Megatron model ====")
+    _print_params(mgmodel)
+    args = hf_config
+    use_fp16 = getattr(hf_config, "fp16", False)
+    use_bf16 = getattr(hf_config, "bf16", False)
+    if use_fp16:
+        mgmodel = mgmodel.half()
+        hfmodel = hfmodel.half()
+    elif use_bf16:
+        mgmodel = mgmodel.bfloat16()
+        hfmodel = hfmodel.bfloat16()
+
+    num_attention_heads = args.num_attention_heads
+    num_query_groups = args.num_key_value_heads
+    hidden_size = args.hidden_size
     head_dim = hidden_size // num_attention_heads
 
-    # 1. vision model
-    hfvision = hfmodel.visual
-    mgvision = mgmodel.vision_model
-    vision_hidden_size = mgvision.config.hidden_size
-    vision_num_query_groups = mgvision.config.num_query_groups
-    vision_head_dim = vision_hidden_size // mgvision.config.num_attention_heads
     copied_numel = 0
-    safe_copy(hfvision.rotary_pos_emb.inv_freq, mgvision.rotary_pos_emb.inv_freq)
-    copied_numel += safe_copy(hfvision.patch_embed.proj.weight, mgvision.patch_embed.proj.weight)
-    for hfblock, mgblock in zip(hfvision.blocks, mgvision.decoder.layers):
-        # norm1 --> linear_qkv.norm
-        copied_numel += safe_copy(hfblock.norm1.weight, mgblock.self_attention.linear_qkv.layer_norm_weight)
-        # norm2 --> mlp.linear_fc1.norm
-        copied_numel += safe_copy(hfblock.norm2.weight, mgblock.mlp.linear_fc1.layer_norm_weight)
-        # qkv --> self_attention.linear_qkv
-        converted_weight = (
-            hfblock.attn.qkv.weight.view(3, vision_num_query_groups, -1, vision_head_dim, vision_hidden_size)
-            .transpose(0, 1)
-            .flatten(1, 2)
-            .reshape(-1, vision_hidden_size)
-            .contiguous()
-        )
-        copied_numel += safe_copy(converted_weight, mgblock.self_attention.linear_qkv.weight)
-        converted_bias = (
-            hfblock.attn.qkv.bias.view(3, vision_num_query_groups, -1)
-            .transpose(0, 1)
-            .flatten(1, 2)
-            .view(-1)
-            .contiguous()
-        )
-        copied_numel += safe_copy(converted_bias, mgblock.self_attention.linear_qkv.bias)
-        # proj --> self_attention.linear_proj
-        copied_numel += safe_copy(hfblock.attn.proj.weight, mgblock.self_attention.linear_proj.weight)
-        copied_numel += safe_copy(hfblock.attn.proj.bias, mgblock.self_attention.linear_proj.bias)
-        # mlp --> mlp: gate
-        fc1_weight = torch.cat([hfblock.mlp.gate_proj.weight, hfblock.mlp.up_proj.weight])
-        fc1_bias = torch.cat([hfblock.mlp.gate_proj.bias, hfblock.mlp.up_proj.bias])
-        copied_numel += safe_copy(fc1_weight, mgblock.mlp.linear_fc1.weight)
-        copied_numel += safe_copy(fc1_bias, mgblock.mlp.linear_fc1.bias)
-        copied_numel += safe_copy(hfblock.mlp.down_proj.weight, mgblock.mlp.linear_fc2.weight)
-        copied_numel += safe_copy(hfblock.mlp.down_proj.bias, mgblock.mlp.linear_fc2.bias)
+    total_numel = 0
+    
+    for p_name, param in hfmodel.named_parameters():
+        if p_name.startswith("visual.vision_model.head"):
+            print(f"Skip this layer with head: {p_name}")
+            continue
+        total_numel += param.numel()
+        
+    # ============ 1. 视觉模型转换 ============
+    hfvision = hfmodel.visual.vision_model
+    mgvision = mgmodel.visual
 
-    # 2. vision projector
-    hfprojector = hfvision.merger
-    mgprojector = mgvision.projection
-    copied_numel += safe_copy(hfprojector.ln_q.weight, mgvision.decoder.final_layernorm.weight)
-
-    copied_numel += safe_copy(hfprojector.mlp[0].weight, mgprojector.encoder.linear_fc1.weight)
-    copied_numel += safe_copy(hfprojector.mlp[0].bias, mgprojector.encoder.linear_fc1.bias)
-    copied_numel += safe_copy(hfprojector.mlp[2].weight, mgprojector.encoder.linear_fc2.weight)
-    copied_numel += safe_copy(hfprojector.mlp[2].bias, mgprojector.encoder.linear_fc2.bias)
-    n_params = sum([t.numel() for t in hfvision.state_dict().values()])
-    assert n_params == copied_numel
-    # 3. llm [just Qwen2]
-    hfllm = hfmodel.model
-    mgllm = mgmodel.language_model
-    copied_numel = 0
-    copied_numel += safe_copy(hfllm.embed_tokens.weight, mgllm.embedding.word_embeddings.weight)
-    for mglayer, hflayer in zip(mgllm.decoder.layers, hfllm.layers):
+    
+    # 嵌入层转换
+    copied_numel += safe_copy(hfvision.embeddings.patch_embedding.weight, mgvision.embeddings.patch_embedding.weight)
+    copied_numel += safe_copy(hfvision.embeddings.patch_embedding.bias, mgvision.embeddings.patch_embedding.bias)
+    copied_numel += safe_copy(hfvision.embeddings.position_embedding.weight, mgvision.embeddings.position_embedding.weight)
+    copied_numel += safe_copy(hfvision.embeddings.packing_position_embedding.weight, mgvision.embeddings.packing_position_embedding.weight)
+    
+    copied_numel += safe_copy(hfvision.post_layernorm.weight, mgvision.final_layernorm.weight)
+    copied_numel += safe_copy(hfvision.post_layernorm.bias, mgvision.final_layernorm.bias)
+    # 视觉编码器层转换
+    for layer_idx, (hfblock, mgblock) in enumerate(zip(hfvision.encoder.layers, mgvision.layers)):
+        # 自注意力层转换
+        # layer_norm1 -> self_attention.linear_qkv.layer_norm_weight
+        copied_numel += safe_copy(hfblock.layer_norm1.weight, mgblock.layer_norm1.weight)
+        copied_numel += safe_copy(hfblock.layer_norm1.bias, mgblock.layer_norm1.bias)
+        copied_numel += safe_copy(hfblock.layer_norm2.weight, mgblock.layer_norm2.weight)
+        copied_numel += safe_copy(hfblock.layer_norm2.bias, mgblock.layer_norm2.bias)
+        # QKV投影合并转换
+        # HF: 分离的q_proj, k_proj, v_proj  
+        # MG: 合并的linear_qkv.weight [Q+K+V, hidden_size]
+        # q_weight = hfblock.self_attn.q_proj.weight
+        # k_weight = hfblock.self_attn.k_proj.weight  
+        # v_weight = hfblock.self_attn.v_proj.weight
+        # qkv_weight = torch.cat([q_weight, k_weight, v_weight], dim=0)
+        copied_numel += safe_copy(hfblock.self_attn.q_proj.weight, mgblock.attention.q_proj.weight)
+        copied_numel += safe_copy(hfblock.self_attn.k_proj.weight, mgblock.attention.k_proj.weight)
+        copied_numel += safe_copy(hfblock.self_attn.v_proj.weight, mgblock.attention.v_proj.weight)
+        copied_numel += safe_copy(hfblock.self_attn.out_proj.weight, mgblock.attention.out_proj.weight)
+        copied_numel += safe_copy(hfblock.self_attn.q_proj.bias, mgblock.attention.q_proj.bias)
+        copied_numel += safe_copy(hfblock.self_attn.k_proj.bias, mgblock.attention.k_proj.bias)
+        copied_numel += safe_copy(hfblock.self_attn.v_proj.bias, mgblock.attention.v_proj.bias)
+        copied_numel += safe_copy(hfblock.self_attn.out_proj.bias, mgblock.attention.out_proj.bias)
+        
+        
+        # QKV偏置合并转换
+        # q_bias = hfblock.self_attn.q_proj.bias
+        # k_bias = hfblock.self_attn.k_proj.bias
+        # v_bias = hfblock.self_attn.v_proj.bias
+        # qkv_bias = torch.cat([q_bias, k_bias, v_bias], dim=0)
+        # copied_numel += safe_copy(qkv_bias, mgblock.attention.linear_qkv.bias)
+        
+        # # 输出投影转换：out_proj -> linear_proj
+        # copied_numel += safe_copy(hfblock.self_attn.out_proj.weight, mgblock.attention.linear_proj.weight)
+        # copied_numel += safe_copy(hfblock.self_attn.out_proj.bias, mgblock.attention.linear_proj.bias)
+        
+        # MLP层转换
+        # layer_norm2 -> mlp.linear_fc1.layer_norm_weight
+        # copied_numel += safe_copy(hfblock.layer_norm2.weight, mgblock.mlp.linear_fc1.layer_norm_weight)
+        # copied_numel += safe_copy(hfblock.layer_norm2.bias, mgblock.mlp.linear_fc1.layer_norm_bias)
+        
+        # MLP权重转换：fc1, fc2 -> linear_fc1, linear_fc2
+        copied_numel += safe_copy(hfblock.mlp.fc1.weight, mgblock.mlp.linear_fc1.weight)
+        copied_numel += safe_copy(hfblock.mlp.fc1.bias, mgblock.mlp.linear_fc1.bias)
+        copied_numel += safe_copy(hfblock.mlp.fc2.weight, mgblock.mlp.linear_fc2.weight)
+        copied_numel += safe_copy(hfblock.mlp.fc2.bias, mgblock.mlp.linear_fc2.bias)
+    
+    # ============ 2. MLP_AR转换 ============
+    copied_numel += safe_copy(hfmodel.mlp_AR.pre_norm.weight, mgmodel.mlp_AR.pre_norm.weight)
+    copied_numel += safe_copy(hfmodel.mlp_AR.pre_norm.bias, mgmodel.mlp_AR.pre_norm.bias)
+    copied_numel += safe_copy(hfmodel.mlp_AR.linear_1.weight, mgmodel.mlp_AR.linear_1.weight)
+    copied_numel += safe_copy(hfmodel.mlp_AR.linear_1.bias, mgmodel.mlp_AR.linear_1.bias)
+    copied_numel += safe_copy(hfmodel.mlp_AR.linear_2.weight, mgmodel.mlp_AR.linear_2.weight)
+    copied_numel += safe_copy(hfmodel.mlp_AR.linear_2.bias, mgmodel.mlp_AR.linear_2.bias)
+    
+    # ============ 3. 语言模型转换 ============
+    # with open("/nlp_group/yuanjiawei05/new_logits_distill/mgmodel_state_dict_keys.txt", "w") as f:
+    #     for k in mgmodel.state_dict().keys():
+    #         f.write(k + "\n")
+    if hasattr(hfmodel.model, 'embed_tokens') and hfmodel.model.embed_tokens.weight.numel() > 0:
+        copied_numel += safe_copy(hfmodel.model.embed_tokens.weight, mgmodel.language_model.embedding.word_embeddings.weight)
+    else:
+        print("[WARNING] Could not find embed_tokens in hf_model.")
+    
+    # Transformer层转换
+    for layer_idx, (hflayer, mglayer) in enumerate(zip(hfmodel.model.layers, mgmodel.language_model.decoder.layers)):
+        # 修正：自注意力层转换
+        # HF: input_layernorm, 分离的q_proj/k_proj/v_proj
+        # MG: 合并的linear_qkv (包含layer_norm和qkv权重)
         copied_numel += safe_copy(hflayer.input_layernorm.weight, mglayer.self_attention.linear_qkv.layer_norm_weight)
-
-        q_proj_weight = hflayer.self_attn.q_proj.weight.view(num_query_groups, -1, head_dim, hidden_size)
-        k_proj_weight = hflayer.self_attn.k_proj.weight.view(num_query_groups, -1, head_dim, hidden_size)
-        v_proj_weight = hflayer.self_attn.v_proj.weight.view(num_query_groups, -1, head_dim, hidden_size)
-        qkv_proj = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=1).view(-1, hidden_size).contiguous()
-        copied_numel += safe_copy(qkv_proj, mglayer.self_attention.linear_qkv.weight)
-
-        q_proj_bias = hflayer.self_attn.q_proj.bias.view(num_query_groups, -1)
-        k_proj_bias = hflayer.self_attn.k_proj.bias.view(num_query_groups, -1)
-        v_proj_bias = hflayer.self_attn.v_proj.bias.view(num_query_groups, -1)
-        qkv_bias = torch.cat([q_proj_bias, k_proj_bias, v_proj_bias], dim=1).view(-1).contiguous()
-        copied_numel += safe_copy(qkv_bias, mglayer.self_attention.linear_qkv.bias)
+        
+        # QKV权重合并转换
+        q_weight = hflayer.self_attn.q_proj.weight.view(num_query_groups, -1, head_dim, hidden_size)
+        k_weight = hflayer.self_attn.k_proj.weight.view(num_query_groups, -1, head_dim, hidden_size)
+        v_weight = hflayer.self_attn.v_proj.weight.view(num_query_groups, -1, head_dim, hidden_size)
+        qkv_weight = torch.cat([q_weight, k_weight, v_weight], dim=1).view(-1, hidden_size).contiguous()
+        copied_numel += safe_copy(qkv_weight, mglayer.self_attention.linear_qkv.weight)
+        
+        # Q和K的层归一化
+        copied_numel += safe_copy(hflayer.self_attn.q_norm.weight, mglayer.self_attention.q_layernorm.weight)
+        copied_numel += safe_copy(hflayer.self_attn.k_norm.weight, mglayer.self_attention.k_layernorm.weight)
+        
+        # 输出投影转换：o_proj -> linear_proj
         copied_numel += safe_copy(hflayer.self_attn.o_proj.weight, mglayer.self_attention.linear_proj.weight)
-
-        fc1_weight = torch.cat([hflayer.mlp.gate_proj.weight, hflayer.mlp.up_proj.weight])
-        copied_numel += safe_copy(fc1_weight, mglayer.mlp.linear_fc1.weight)
-
-        copied_numel += safe_copy(hflayer.mlp.down_proj.weight, mglayer.mlp.linear_fc2.weight)
+        
+        # MLP转换
+        # HF: post_attention_layernorm, 分离的gate_proj/up_proj/down_proj
+        # MG: 合并的linear_fc1 (包含layer_norm和gate+up权重), linear_fc2
         copied_numel += safe_copy(hflayer.post_attention_layernorm.weight, mglayer.mlp.linear_fc1.layer_norm_weight)
+        
+        # MLP权重转换 - 合并gate_proj和up_proj
+        gate_weight = hflayer.mlp.gate_proj.weight  # [12288, 4096]
+        up_weight = hflayer.mlp.up_proj.weight      # [12288, 4096]
+        fc1_weight = torch.cat([gate_weight, up_weight], dim=0)  # [24576, 4096]
+        copied_numel += safe_copy(fc1_weight, mglayer.mlp.linear_fc1.weight)
+        
+        # down_proj转换
+        copied_numel += safe_copy(hflayer.mlp.down_proj.weight, mglayer.mlp.linear_fc2.weight)
+    
+    # 最终层归一化转换：model.norm -> model.decoder.final_layernorm
+    copied_numel += safe_copy(hfmodel.model.norm.weight, mgmodel.language_model.decoder.final_layernorm.weight)
 
-    copied_numel += safe_copy(hfllm.norm.weight, mgllm.decoder.final_layernorm.weight)
-    if not hf_config.tie_word_embeddings:
-        safe_copy(hfmodel.lm_head.weight, mgllm.output_layer.weight)
+    copied_numel += safe_copy(hfmodel.lm_head.weight, mgmodel.language_model.output_layer.weight)
 
-    n_params = sum([t.numel() for t in hfllm.state_dict().values()])
+    # with open("/nlp_group/yuanjiawei05/new_logits_distill/baseline_hf_patch_embedding.pt", "wb") as f:
+    #     torch.save(hfvision.embeddings.patch_embedding.weight, f)
 
-    assert n_params == copied_numel
+    # with open("/nlp_group/yuanjiawei05/new_logits_distill/baseline_mcore_patch_embedding.pt", "wb") as f:
+    #     torch.save(mgvision.embeddings.patch_embedding.weight, f)
+
+    assert total_numel == copied_numel
 
 
 @torch.inference_mode()
@@ -468,7 +530,8 @@ def convert_hf_to_mcore(hf_model_path, output_path, use_cpu_initialization=False
     model_parallel_cuda_manual_seed(0)
 
     # init hf config
-    hf_config = AutoConfig.from_pretrained(hf_model_path)
+    hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+    hf_config._attn_implementation = "flash_attention_2"
     print(hf_config, flush=True)
 
     tfconfig = hf_to_mcore_config(hf_config, torch.bfloat16)
@@ -482,6 +545,7 @@ def convert_hf_to_mcore(hf_model_path, output_path, use_cpu_initialization=False
         parallel_model = init_mcore_model(
             tfconfig,
             hf_config,
+            hf_model_path,
             pre_process,
             post_process,
             share_embeddings_and_output_weights=tie_word_embeddings,
@@ -512,7 +576,7 @@ def convert_hf_to_mcore(hf_model_path, output_path, use_cpu_initialization=False
             hf_model_path, torch_dtype=torch.bfloat16, trust_remote_code=trust_remote_code
         )
     elif "KeyeForConditionalGeneration" in hf_config.architectures:
-        hf_model = AutoModel.from_pretrained(hf_model_path, torch_dtype=torch.bfloat16, trust_remote_code=True)
+        hf_model = AutoModel.from_pretrained(hf_model_path, config=hf_config, torch_dtype=torch.bfloat16, trust_remote_code=True)
     else:
         hf_model = AutoModelForCausalLM.from_pretrained(
             hf_model_path, torch_dtype=torch.bfloat16, trust_remote_code=trust_remote_code

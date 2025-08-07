@@ -1,7 +1,7 @@
 set -x
 
-DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/converted_mcore"
-LLM="/hetu_group/jky/misc/tools/swift_20250508/playground/keye_8b_20250613/rl/20250703.1.r1reward/global_step80_hf"
+DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/new_converted_hf"
+LLM="/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/AutoThink/20250801.new_pretrain_mpo_cotmix_addmore_256gpu/output/v0-20250731-203710/checkpoint-2544"
 HOME=/nlp_group/huangjiaming/
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
@@ -72,6 +72,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.top_p=0.9 \
     actor_rollout_ref.rollout.top_k=50 \
+    ++actor_rollout_ref.rollout.debug_dump_sglang_tensor=True \
     ++actor_rollout_ref.rollout.repetition_penalty=1.1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$INFER_TP \
     actor_rollout_ref.rollout.free_cache_engine=True \

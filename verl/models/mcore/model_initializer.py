@@ -482,6 +482,7 @@ class KeyeQwen3Model(BaseModelInitializer):
         if tfconfig.mtp_num_layers is not None:
             mtp_block_spec = get_gpt_mtp_block_spec(tfconfig, transformer_layer_spec, use_transformer_engine=True)
 
+        assert tfconfig.tensor_model_parallel_size == 1, print("Mcore2HF weight converter only supports tp = 1!")
         print_rank_0(f"in KeyeQwen3Model initialize\n\ntransformer_config={tfconfig}\n\nvision_config={vision_config}")
 
         def monkey_patch_init(

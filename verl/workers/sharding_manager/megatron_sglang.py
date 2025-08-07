@@ -208,8 +208,6 @@ class MegatronSGLangShardingManager(BaseShardingManager):
                 if self.device_mesh["tp"].get_local_rank() == 0:
                     await self.inference_engine.post_load_weights_from_tensor()
 
-
-
         if not hasattr(self, '_first_call_update_weights') or not self._first_call_update_weights:
             self._first_call_update_weights = True
             if self.rollout_config.get("debug_dump_sglang_tensor", None):

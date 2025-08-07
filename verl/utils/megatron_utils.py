@@ -682,7 +682,18 @@ def default_tp_concat_fn(
     from megatron.core import mpu
 
     train_tp_size = mpu.get_tensor_model_parallel_world_size()
-    if layer_name_mapping.get("qkv_layer_name") in name and "layer_norm" not in name:
+    is_qkv = False
+    is_gateup = False
+    is_keyeqwen3 = (model_config.architectures[0] == "KeyeForConditionalGeneration")
+    if is_keyeqwen3:
+        model_type = name.split(".")[0]
+        if model_type == "language_model":
+            if name.endswith(".linear_qkv.weight"):
+                is_qkv = True
+            elif name.endswith(".linear_fc1.weight"):
+                is_gateup = True
+
+    if layer_name_mapping.get("qkv_layer_name") in name and "layer_norm" not in name or is_qkv:
         # if the tensor is qkv, for each param on tp, split into q, k, v
         # concat q, k, v separately.
         q_lst = []
@@ -693,6 +704,16 @@ def default_tp_concat_fn(
         if "vision_model" in name:
             num_attention_heads = hf_config.vision_config.num_heads
             num_key_value_heads = hf_config.vision_config.num_heads
+
+        if is_keyeqwen3:
+            model_type = name.split(".")[0]
+            if model_type == "visual":
+                num_attention_heads = hf_config.vision_config.num_attention_heads
+                num_key_value_heads = getattr(
+                                            hf_config.vision_config,
+                                            "num_key_value_heads",
+                                            num_attention_heads
+                                        )
         assert num_attention_heads % num_key_value_heads == 0
         num_q_per_kv = num_attention_heads // num_key_value_heads
         assert infer_params[0].shape[0] % (num_q_per_kv + 2) == 0, (
@@ -715,12 +736,16 @@ def default_tp_concat_fn(
         q = torch.cat(q_lst, dim=0)
         k = torch.cat(k_lst, dim=0)
         v = torch.cat(v_lst, dim=0)
+        if is_keyeqwen3:
+            return [q, k, v]
         infer_params = torch.cat((q, k, v), dim=0) if not convert_qkv_gate_up_by_simple_split else [q, k, v]
 
     elif (
         layer_name_mapping.get("gate_proj_layer_name") in name
         and "layer_norm" not in name
         and "vision_model.projection" not in name
+        and "visual" not in name
+        or is_gateup
     ):
         # if the tensor is gate and proj
         gate_lst = []
@@ -731,6 +756,8 @@ def default_tp_concat_fn(
             up_lst.append(up)
         gate = torch.cat(gate_lst, dim=0)
         up = torch.cat(up_lst, dim=0)
+        if is_keyeqwen3:
+            return [gate, up]
         infer_params = torch.cat((gate, up), dim=0) if not convert_qkv_gate_up_by_simple_split else [gate, up]
 
     elif "mlp.experts.linear_fc2.weight" in name:  # moe
@@ -738,8 +765,10 @@ def default_tp_concat_fn(
 
     else:
         # concat tensor
-        infer_params = torch.cat(infer_params, dim=tp_utils.get_tensor_parallel_partition_dim(train_params))
-
+        if not is_keyeqwen3:
+            infer_params = torch.cat(infer_params, dim=tp_utils.get_tensor_parallel_partition_dim(train_params))
+        else:
+            return infer_params
     return infer_params
 
 
@@ -761,6 +790,7 @@ def per_tensor_generator(
     vpp_size = len(actor_module)
     all_gather_group = mpu.get_tensor_model_parallel_group()
     all_gather_group_size = torch.distributed.get_world_size(group=all_gather_group)
+
 
     def tensor_generator():
         for scan_vpp_idx in range(vpp_size):
@@ -862,14 +892,10 @@ def per_tensor_generator(
                 yield from zip(converted_names, converted_params)
             continue
 
-        # tp all gather
-        if tp_utils.is_tensor_parallel_param(broad_pp_tensor):
-            # allocate a new tensor with proper size
-            if all_gather_group_size <= 1:
-                infer_params = [broad_pp_tensor]
-            else:
-                infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(all_gather_group_size)]
-                torch.distributed.all_gather(infer_params, broad_pp_tensor, group=mpu.get_tensor_model_parallel_group())
+
+        is_keyeqwen3 = (model_config.architectures[0] == "KeyeForConditionalGeneration")
+        if is_keyeqwen3:
+            infer_params = [broad_pp_tensor]
             infer_params = default_tp_concat_fn(
                 layer_name_mapping,
                 cur_name,
@@ -880,12 +906,34 @@ def per_tensor_generator(
                 convert_qkv_gate_up_by_simple_split,
             )
         else:
-            infer_params = broad_pp_tensor
+            # tp all gather
+            if tp_utils.is_tensor_parallel_param(broad_pp_tensor):
+                # allocate a new tensor with proper size
+                if all_gather_group_size <= 1:
+                    infer_params = [broad_pp_tensor]
+                else:
+                    infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(all_gather_group_size)]
+                    torch.distributed.all_gather(infer_params, broad_pp_tensor, group=mpu.get_tensor_model_parallel_group())
+                infer_params = default_tp_concat_fn(
+                    layer_name_mapping,
+                    cur_name,
+                    broad_pp_tensor,
+                    infer_params,
+                    model_config,
+                    weight_converter.hf_config,
+                    convert_qkv_gate_up_by_simple_split,
+                )
+            else:
+                infer_params = broad_pp_tensor
 
         if not isinstance(infer_params, list):
             infer_params = [infer_params]
-        converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)
 
+        converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)
+        
+        if not isinstance(converted_names, list):
+            print(f"name is not list {converted_names=}")
+            converted_names = [converted_names]
         yield from zip(converted_names, converted_params)
 
 
