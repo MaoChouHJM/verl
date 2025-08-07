@@ -311,8 +311,8 @@ def gptmodel_forward_keye_qwen3_slowfast(
                         qkv_format="thd",
                         cu_seqlens_q=batch.get("fast_vision_cu_seqlens", None),
                         cu_seqlens_kv=batch.get("fast_vision_cu_seqlens", None),
-                        max_seqlen_q=batch.get("fast_vision_max_seqlen", None)),
-                        max_seqlen_kv=batch.get("fast_vision_max_seqlen", None)),
+                        max_seqlen_q=batch.get("fast_vision_max_seqlen", None),
+                        max_seqlen_kv=batch.get("fast_vision_max_seqlen", None),
                     )
 
         output_tensor = model(

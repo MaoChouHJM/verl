@@ -26,23 +26,21 @@ import torch.nn as nn
 from .config_converter import (PretrainedConfig, TransformerConfig,
                                hf_to_mcore_config_dense,
                                hf_to_mcore_config_dpskv3,
-                               hf_to_mcore_config_keye_qwen3,
                                hf_to_mcore_config_keye_qwen3_slowfast,
                                hf_to_mcore_config_llama4,
                                hf_to_mcore_config_mixtral,
                                hf_to_mcore_config_qwen2_5_vl,
                                hf_to_mcore_config_qwen2moe,
                                hf_to_mcore_config_qwen3moe)
-from .model_forward import (gptmodel_forward, gptmodel_forward_keye_qwen3,
+from .model_forward import (gptmodel_forward,
                             gptmodel_forward_keye_qwen3_slowfast,
                             gptmodel_forward_qwen2_5_vl)
 from .model_initializer import (BaseModelInitializer, DeepseekV3Model,
-                                DenseModel, KeyeQwen3Model,
+                                DenseModel,
                                 KeyeQwen3SlowFastModel, MixtralModel,
                                 Qwen2MoEModel, Qwen3MoEModel, Qwen25VLModel)
 from .weight_converter import (McoreToHFWeightConverterDense,
                                McoreToHFWeightConverterDpskv3,
-                               McoreToHFWeightConverterKeyeQwen3,
                                McoreToHFWeightConverterKeyeQwen3SlowFast,
                                McoreToHFWeightConverterMixtral,
                                McoreToHFWeightConverterQwen2_5_VL,
@@ -60,7 +58,6 @@ class SupportedModel(Enum):
     LLAMA4 = "Llama4ForConditionalGeneration"  # not tested
     QWEN3 = "Qwen3ForCausalLM"  # tested
     QWEN3_MOE = "Qwen3MoeForCausalLM"  # not tested
-    KEYE_PREVIEW = "KeyePreview" # not tested
     KEYE = "KeyeForConditionalGeneration" # not tested
 
 
@@ -77,7 +74,6 @@ MODEL_CONFIG_CONVERTER_REGISTRY: Dict[SupportedModel, Callable[[PretrainedConfig
     SupportedModel.QWEN3_MOE: hf_to_mcore_config_qwen3moe,
     SupportedModel.QWEN2_5_VL: hf_to_mcore_config_qwen2_5_vl,
     SupportedModel.KEYE: hf_to_mcore_config_keye_qwen3_slowfast,
-    SupportedModel.KEYE_PREVIEW: hf_to_mcore_config_keye_qwen3,
 }
 
 # Registry for model initializers
@@ -93,7 +89,6 @@ MODEL_INITIALIZER_REGISTRY: Dict[SupportedModel, Type[BaseModelInitializer]] = {
     SupportedModel.QWEN3_MOE: Qwen3MoEModel,
     SupportedModel.QWEN2_5_VL: Qwen25VLModel,
     SupportedModel.KEYE: KeyeQwen3SlowFastModel,
-    SupportedModel.KEYE_PREVIEW: KeyeQwen3SlowFastModel,
 }
 
 # Registry for model forward functions
@@ -109,7 +104,6 @@ MODEL_FORWARD_REGISTRY: Dict[SupportedModel, Callable] = {
     SupportedModel.QWEN3_MOE: gptmodel_forward,
     SupportedModel.QWEN2_5_VL: gptmodel_forward_qwen2_5_vl,
     SupportedModel.KEYE: gptmodel_forward_keye_qwen3_slowfast,
-    SupportedModel.KEYE_PREVIEW: gptmodel_forward_keye_qwen3,
 }
 
 # Registry for model weight converters
@@ -123,15 +117,10 @@ MODEL_WEIGHT_CONVERTER_REGISTRY: Dict[SupportedModel, Type] = {
     SupportedModel.QWEN3_MOE: McoreToHFWeightConverterQwen3Moe,
     SupportedModel.QWEN2_5_VL: McoreToHFWeightConverterQwen2_5_VL,
     SupportedModel.KEYE: McoreToHFWeightConverterKeyeQwen3SlowFast,
-    SupportedModel.KEYE_PREVIEW: McoreToHFWeightConverterKeyeQwen3,
 }
 
 
 def get_supported_model(model_type: str) -> SupportedModel:
-    import os
-    if model_type == "KeyeForConditionalGeneration":
-        if os.environ.get("USE_SLOW_FAST", "false").lower() == "false":
-            model_type = "KeyePreview"  
     try:
         return SupportedModel(model_type)
     except ValueError as err:

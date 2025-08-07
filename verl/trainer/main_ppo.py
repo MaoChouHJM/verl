@@ -42,6 +42,9 @@ def run_ppo(config) -> None:
     # isolation, will solve in the future
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     user_custom_env = config.get("user_custom_env", {})
+    for k, v in user_custom_env.items():
+        if not isinstance(v, str):
+            user_custom_env[k] = str(v)
     print(f"User custom env: {user_custom_env}")
     # Check if Ray is not initialized
     if not ray.is_initialized():
@@ -128,11 +131,11 @@ class TaskRunner:
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
         if config.actor_rollout_ref.model.get("custom_chat_template", None) is not None:
-            print(f'{self.config.model.custom_chat_template=}')
-            if self.processor is not None:
-                self.processor.chat_template = self.config.model.custom_chat_template
-            if self.tokenizer is not None:
-                self.tokenizer.chat_template = self.config.model.custom_chat_template
+            print(f'{config.actor_rollout_ref.model.custom_chat_template=}')
+            if processor is not None:
+                processor.chat_template = config.actor_rollout_ref.model.custom_chat_template
+            if tokenizer is not None:
+                tokenizer.chat_template = config.actor_rollout_ref.model.custom_chat_template
 
         # Version validation for vllm.
         if config.actor_rollout_ref.rollout.name in ["vllm"]:
@@ -337,7 +340,6 @@ def create_rl_sampler(data_config, dataset):
         sampler = SequentialSampler(data_source=dataset)
 
     return sampler
-
 
 if __name__ == "__main__":
     main()
