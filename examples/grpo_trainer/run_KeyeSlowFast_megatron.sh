@@ -1,8 +1,9 @@
 set -x
 
 DIST_CKPT_PATH="/mmu_mllm_hdd_2/lilaiyi/718/kai-megatron/output/save/dist_ckpt_step27000/iter_0000001"
-LLM="/mmu_mllm_hdd_2/zhouyang12/output1/Keye/0.9.3/Stage2/8b/slowfast-0721-0717-v2/step27000/global_step27000/converted"
+LLM="/mmu_mllm_hdd_2/zhouyang1o2/output1/Keye/0.9.3/Stage2/8b/slowfast-0721-0717-v2/step27000/global_step27000/converted"
 HOME=/nlp_group/huangjiaming/
+PWD=$(PWD)
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
 # 2. run the script
@@ -41,18 +42,26 @@ export HYDRA_FULL_ERROR=1
 
 python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
     ++user_custom_env.USE_SLOW_FAST=True \
-    ++user_custom_env.MIN_PIXELS=1024 \
-    ++user_custom_env.MAX_PIXELS=1310720 \
+    ++user_custom_env.MIN_PIXELS=102400 \
+    ++user_custom_env.MAX_PIXELS=3010560 \
+    ++user_custom_env.KEYE_IMAGE_FACTOR=28 \
+    ++user_custom_env.FPS_MAX_FRAMES=32 \
+    ++user_custom_env.VIDEO_TOTAL_PIXELS=6422528 \
     algorithm.adv_estimator=grpo \
+    data.custom_cls.name=KeyeQwen3SlowFastDataset \
+    data.custom_cls.path=$PWD/verl/utils/dataset/keye_qwen3_slowfast_dataset.py \
+    ++data.base_model_dir=$LLM \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.return_raw_chat=$return_raw_chat \
     data.train_batch_size=32 \
-    data.max_prompt_length=1024 \
-    data.max_response_length=1024 \
+    data.max_prompt_length=5120 \
+    data.max_response_length=3072 \
     data.filter_overlong_prompts=False \
     data.truncation='error' \
-    actor_rollout_ref.model.custom_chat_template="{% set image_count = namespace(value=0) %}{% set video_count = namespace(value=0) %}{% for message in messages %}<|im_start|>{{ message['role'] }}\n{% if message['content'] is string %}{{ message['content'] }}<|im_end|>\n{% else %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}{% set image_count.value = image_count.value + 1 %}{% if add_vision_id %}Picture {{ image_count.value }}: {% endif %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}{% set video_count.value = video_count.value + 1 %}{% if add_vision_id %}Video {{ video_count.value }}: {% endif %}<|vision_start|><|video_pad|><|vision_end|>{% elif 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}" \
+    data.prompt_key=messages \
+    data.image_key=images \
+    data.reward_fn_key=swift_reward_type \
     actor_rollout_ref.model.path=$LLM \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -67,18 +76,19 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.gpu_memory_utilization=0.60 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.temperature=1.0 \
-    actor_rollout_ref.rollout.top_p=1.0 \
-    actor_rollout_ref.rollout.top_k=-1 \
+    actor_rollout_ref.rollout.top_p=0.9 \
+    actor_rollout_ref.rollout.top_k=50 \
+    actor_rollout_ref.rollout.repetition_penalty=1.0 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$INFER_TP \
     actor_rollout_ref.rollout.free_cache_engine=True \
     +actor_rollout_ref.rollout.override_config.chunked_prefill_size=32768 \
-    +actor_rollout_ref.rollout.override_config.moe_dense_tp_size=1 \
-    +actor_rollout_ref.rollout.override_config.enable_deepep_moe=True \
-    +actor_rollout_ref.rollout.override_config.deepep_mode=normal \
-    +actor_rollout_ref.rollout.override_config.dp_size=$INFER_TP \
-    +actor_rollout_ref.rollout.override_config.enable_dp_attention=True \
-    +actor_rollout_ref.rollout.override_config.enable_dp_lm_head=True \
     algorithm.use_kl_in_reward=False \
+    reward_model.reward_manager=keye \
+    reward_model.launch_reward_fn_async=True \
+    ++reward_model.reward_kwargs.reward_fn_types=\'ModelBaseAccuracyv2,MyFormat\' \
+    ++reward_model.reward_kwargs.model_api_address=\'10.82.121.34,10.82.122.98,10.82.120.218\' \
+    ++reward_model.reward_kwargs.model_api_port=\'8000\' \
+    ++reward_model.enable_reward_workers=True \
     trainer.logger=['console'] \
     trainer.project_name=$project_name \
     trainer.experiment_name=$experiment_name \
