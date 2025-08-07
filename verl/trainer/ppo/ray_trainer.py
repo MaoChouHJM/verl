@@ -574,19 +574,31 @@ class RayPPOTrainer:
                 "curriculum sampler won't have the opportunity to reorder it. "
             )
 
-        self.train_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
-            num_workers=num_workers,
-            drop_last=True,
-            collate_fn=collate_fn,
-            sampler=train_sampler,
-        )
+        dump_train_res = self.config.actor_rollout_ref.rollout.get("debug_dump_train_rollout_result", False)
+        print(f"[DEBUG] test config: {dump_train_res=}")
+        if dump_train_res:
+            self.train_dataloader = StatefulDataLoader(
+                dataset=self.train_dataset,
+                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+                num_workers=num_workers,
+                drop_last=True,
+                collate_fn=collate_fn,
+            )
+        else:
+            self.train_dataloader = StatefulDataLoader(
+                dataset=self.train_dataset,
+                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+                num_workers=num_workers,
+                drop_last=True,
+                collate_fn=collate_fn,
+                sampler=train_sampler,
+            )
 
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
 
+        print(f"{self.config.data.get("validation_shuffle")=}")
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=val_batch_size,
@@ -683,13 +695,28 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
 
-        for test_data in self.val_dataloader:
+        dump_val_res = self.config.actor_rollout_ref.rollout.get("debug_dump_val_rollout_result", False)
+        if dump_val_res:
+            dump_val_dir = self.config.trainer.get("val_result_dump_dir", None)
+            assert dump_val_dir is not None
+            len_val_data = len(self.val_dataloader)
+            completions = []
+            reward_kwargs = {}
+            rewards_per_func = []
+            print(f"[DEBUG] at validate: {len(self.val_dataloader)=}")
+
+        for idx, test_data in enumerate(self.val_dataloader):
+            for k, v in test_data.items():
+                reward_kwargs[k] = v
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
             test_batch = test_batch.repeat(
                 repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
             )
+
+            if dump_val_res:
+                test_batch.save_to_disk(f"{dump_val_dir}/test_batch_{idx}.pkl")
 
             # we only do validation on rule-based rm
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
@@ -742,12 +769,13 @@ class RayPPOTrainer:
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
-            print("validation generation end")
-
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
+
+            if dump_val_res:
+                completions.append(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -759,18 +787,27 @@ class RayPPOTrainer:
                 test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch, self.rm_worker_wg.world_size)
                 result = self.rm_worker_wg.compute_val_reward(test_batch_padded)
                 result = unpad_dataproto(result, pad_size)
-                result = {**result.batch, 'rewrad_extra_info': result.non_tensor_batch}
+                result = {**result.batch, 'reward_extra_info': result.non_tensor_batch}
 
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
+
+            if dump_val_res:
+                fn1_score = result['fn1_score']
+                fn2_score = result['fn2_score']
+                rewards_per_func.append(fn1_score)
+                rewards_per_func.append(fn2_score)
 
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
                     reward_extra_infos_dict[key].extend(lst)
-                    print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+                    # print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+
+            # for k, v in reward_extra_infos_dict.items():
+            #     print(f"[DEBUG] reward_extra_infos_dict, {k=}, {v=}")
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -780,8 +817,18 @@ class RayPPOTrainer:
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
+        if dump_val_res:
+            val_data_dict = {
+                'completions': completions,
+                'reward_kwargs': reward_kwargs,
+                'rewards_per_func': rewards_per_func
+            }
+            
+            torch.save(val_data_dict, f"{dump_val_dir}/val_data_{idx}.pt")
+
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
+        assert val_data_dir is not None
         if val_data_dir:
             self._dump_generations(
                 inputs=sample_inputs,
@@ -1171,6 +1218,16 @@ class RayPPOTrainer:
         last_val_metrics = None
         self.max_steps_duration = 0
 
+        dump_train_res = self.config.actor_rollout_ref.rollout.get("debug_dump_train_rollout_result", False)
+        if dump_train_res:
+            dump_train_dir = self.config.trainer.get("train_result_dump_dir", None)
+            assert dump_train_dir is not None
+            len_val_data = len(self.train_dataloader)
+            completions = []
+            reward_kwargs = {}
+            rewards_per_func = []
+            print(f"[DEBUG] at train: {len_val_data=}")
+
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 do_profile = (
@@ -1191,6 +1248,10 @@ class RayPPOTrainer:
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
+                if dump_train_res:
+                    save_gen_batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    save_gen_batch.save_to_disk(f'{dump_train_dir}/train_batch_{epoch}.pkl')
+
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
@@ -1208,6 +1269,7 @@ class RayPPOTrainer:
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
                 )
+                
                 gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
                 is_last_step = self.global_steps >= self.total_training_steps
@@ -1221,6 +1283,12 @@ class RayPPOTrainer:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+
+                        # [DEBUG]
+                        if dump_train_res:
+                            output_ids = gen_batch_output.batch["responses"]
+                            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+                            completions.append(output_texts)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1295,6 +1363,33 @@ class RayPPOTrainer:
                     # recompute old_log_probs
 
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
+                        ## FOR TEST ONLY
+                        if self.config.reward_model.launch_reward_fn_async:
+                            if self.use_rm_worker:
+                                future_reward_proto = ray.get(futures)
+                                reward_proto = unpad_dataproto(DataProto.concat(future_reward_proto), pad_size)
+                                reward_tensor = reward_proto.batch['reward_tensor']
+                                reward_extra_infos_dict = reward_proto.non_tensor_batch
+                            else:
+                                reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
+                            print(f"[DEBUG] at ray_trainer.py fit before compute old log prob, {reward_tensor=}")
+
+                        if dump_train_res:
+                            print(f"[DEBUG] at ray_trainer old_log_prob, {reward_proto.batch.keys()=}, {reward_proto.non_tensor_batch.keys()=}")
+                            fn1_score = reward_proto.batch['fn1_score']
+                            fn2_score = reward_proto.batch['fn2_score']
+                            rewards_per_func.append(fn1_score.tolist())
+                            rewards_per_func.append(fn2_score.tolist())
+
+                            train_data_dict = {
+                                'completions': completions,
+                                'reward_kwargs': reward_kwargs,
+                                'rewards_per_func': rewards_per_func
+                            }
+                            
+                            torch.save(train_data_dict, f'{dump_train_dir}/train_data_{epoch}.pt')
+
+                        ## END OF TEST
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
@@ -1357,7 +1452,6 @@ class RayPPOTrainer:
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             if self.use_rm_worker:
-
                                 future_reward_proto = ray.get(futures)
                                 reward_proto = unpad_dataproto(DataProto.concat(future_reward_proto), pad_size)
                                 reward_tensor = reward_proto.batch['reward_tensor']

@@ -219,7 +219,7 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         # second_per_grid_ts isn't used for training, just for mrope
         row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
-        if os.envrion.get("USE_SLOW_FAST", "false").lower() == "true":
+        if os.environ.get("USE_SLOW_FAST", "false").lower() == "true":
             position_ids = self.get_rope_index_func(
                     input_ids=input_ids,
                     image_grid_thw=model_inputs.get("image_grid_thw"),
@@ -275,6 +275,7 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
         # add index for each prompt
         index = row_dict.get("extra_info", {}).get("index", 0)
         row_dict["index"] = index
+        # print(f"[DEBUG] at keye dataset line 278: {row_dict.keys()=} {row_dict=}")
 
         return row_dict
 

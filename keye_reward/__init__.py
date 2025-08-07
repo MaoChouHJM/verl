@@ -5,12 +5,16 @@ import random
 import time
 import json
 import numpy as np
+import inspect
+import threading
+import traceback
 
 import asyncio
 import httpx
 from openai import OpenAI
 
 from latex2sympy2_extended import NormalizationConfig
+import nest_asyncio
 #from math_verify import LatexExtractionConfig, parse, verify
 
 
@@ -248,6 +252,17 @@ class ModelBaseAccuracyV2(object):
             map(int, reward_kwargs.get("model_api_port", "1222").split(","))
         )
         self.loop = asyncio.get_event_loop()
+        self.reward_fn_loop = None
+        self.reward_fn_ready = threading.Event()
+        self.reward_fn_thread = threading.Thread(target=self._init_reward_fn_loop, daemon=True)
+        self.reward_fn_thread.start()
+        self.reward_fn_ready.wait()
+
+    def _init_reward_fn_loop(self):
+        self.reward_fn_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.reward_fn_loop)
+        self.reward_fn_ready.set()
+        self.reward_fn_loop.run_forever()
 
     def __call__(self, completions, solution_str, **kwargs) -> List[float]:
         """
@@ -259,22 +274,25 @@ class ModelBaseAccuracyV2(object):
         Returns:
             list[float]: Reward scores
         """
-
-        print("*" * 100, len(completions))
-        print(solution_str)
-        start = time.perf_counter()
-        cur_task = self.loop.create_task(
-            self.async_call(completions, solution_str, **kwargs)
+        print("*" * 50, "at keye __init__.py reward_fn call", len(completions), "*" * 50)
+        print(f"[DEBUG] at keye reward init ModelBaseAccuracyV2 __call__, {solution_str=}")
+        # cur_task = self.loop.create_task(
+        #     self.async_call(completions, solution_str, **kwargs)
+        # )
+        # result = self.robust_run_until_complete(cur_task)
+        assert self.reward_fn_loop is not None, "reward_fn_loop is not initialized."
+        future = asyncio.run_coroutine_threadsafe(
+            self.async_call(completions, solution_str, **kwargs),
+            self.reward_fn_loop,
         )
-        result = self.loop.run_until_complete(cur_task)
-        sync_time = (time.perf_counter() - start) * 1000
-
-        print(f"ModelBaseAccuracy Sync task time: {sync_time}")
+        result = future.result()
+        # print(f"[DEBUG] at keye __init__.py reward_fn call get result")
         return result
 
     async def async_call(self, completions, solution_str, **kwargs) -> float:
         # NOTE(huangjiaming): completions  batch_size = 1
         messages = kwargs.get("messages", [])
+        # print(f"[DEBUG] at async_call, {messages=}")
         if_longcots = [m[0]["role"] == "system" for m in messages]
         #if_longcots = [m[0]["role"] == "system" for m in messages]
         questions = [m[1]["content"] if if_longcot else m[0]["content"] for m, if_longcot in zip(messages, if_longcots)]
@@ -350,7 +368,7 @@ class ModelBaseAccuracyV2(object):
             except Exception as e:
                 print(f"modelreward-retry_{i}-{e} {cur_adress=} {cur_port}")
                 try:
-                    print(completion)
+                    pass
                 except:
                     pass
                 continue
@@ -845,11 +863,21 @@ class KeyeComputeReward(object):
     def __call__(self, solution_str, ground_truth, **kwargs):
         #rewards = np.array([fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns])
         rewards = [fn(solution_str, ground_truth, **kwargs) for fn in self.reward_fns]
+        rewards0 = rewards[0]
+        rewards1 = rewards[1]
         rewards = zip(*rewards)
         rewards = list(rewards)
-        print(f"{rewards=}")
         res = [np.dot(reward, np.array(self.reward_sum_weights)) for reward in rewards]
-        return res
+        if isinstance(rewards0, list):
+            res0 = [x * self.reward_sum_weights[0] for x in rewards0]
+        else:
+            res0 = rewards0 * self.reward_sum_weights[0]
+        if isinstance(rewards1, list):
+            res1 = [x * self.reward_sum_weights[1] for x in rewards1]
+        else:
+            res1 = rewards0 * self.reward_sum_weights[1]
+
+        return res, res0, res1
 
 
 if __name__ == "__main__":

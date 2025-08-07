@@ -15,7 +15,7 @@
 from collections import defaultdict
 
 import torch
-
+import asyncio
 from verl import DataProto
 
 
@@ -70,7 +70,7 @@ class KeyeRewardManager:
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             response_list.append(response_str)
 
-        score_list = self.compute_score(
+        score_list, rewards0, rewards1 = self.compute_score(
                 data_source=data_source,
                 solution_str=response_list,
                 ground_truth=ground_truth,
@@ -128,6 +128,8 @@ class KeyeRewardManager:
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,
+                "fn1_score": rewards0,
+                "fn2_score": rewards1
             }
         else:
             return reward_tensor

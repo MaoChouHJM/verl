@@ -40,7 +40,6 @@ class RewardWorker(Worker):
     def compute_val_reward(self, data: DataProto):
         with self.timing_record('compute_reward/compute_val_reward'):
             res_dict = self.val_reward_fn(data, True)
-            #print(f"extra_info = {res_dict['reward_extra_info']}", flush=True)
             res = DataProto.from_dict({'reward_tensor': res_dict['reward_tensor']},
                                       non_tensors=res_dict['reward_extra_info'])
         return res

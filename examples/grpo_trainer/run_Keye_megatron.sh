@@ -1,7 +1,6 @@
 set -x
 
 DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/new_converted_hf"
-LLM="/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/AutoThink/20250801.new_pretrain_mpo_cotmix_addmore_256gpu/output/v0-20250731-203710/checkpoint-2544"
 HOME=/nlp_group/huangjiaming/
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 

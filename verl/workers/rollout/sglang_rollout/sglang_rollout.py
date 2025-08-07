@@ -433,7 +433,8 @@ class SGLangRollout(BaseRollout):
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
             self._engine = AsyncEngine(
                 model_path=actor_module,
-                dtype=self.config.dtype,
+                # dtype=self.config.dtype,
+                dtype='auto',
                 mem_fraction_static=self.config.gpu_memory_utilization,
                 enable_memory_saver=True,
                 base_gpu_id=0,
@@ -459,6 +460,10 @@ class SGLangRollout(BaseRollout):
                 attention_backend="fa3",
                 # In async mode, we want token in token out.
                 skip_tokenizer_init=self.config.mode == "async",
+                random_seed = 0,
+                # max_running_requests=1,
+                model_loader_extra_config='{"enable_multithread_load": true, "num_threads": 8}',
+                disable_cuda_graph=True,
             )
         else:
             self._engine = None
@@ -1001,6 +1006,22 @@ class SGLangRollout(BaseRollout):
         kwargs = sampling_params.copy()
         kwargs["max_new_tokens"] = max_new_tokens
         kwargs["n"] = 1  # group size is supported in preprocess
+        from datetime import datetime
+        import pickle
+        params_data = {
+            'input_ids': generation_prompt_ids,  # list类型
+            'sampling_params': kwargs,           # dict类型
+            'return_logprob': False,            # bool类型
+            'image_data': image_data,           # list类型
+            'timestamp': datetime.now().isoformat(),  # 添加时间戳
+        }
+
+        pkl_filename = f'/nlp_group/yuanjiawei05/new_logits_distill/engine_input/engine_params_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
+        with open(pkl_filename, 'wb') as f:
+            pickle.dump(params_data, f)
+            
+        print(f"[DEBUG] sglang engine params dumped to: {pkl_filename}")
+
         output = await self._engine.async_generate(
             input_ids=generation_prompt_ids,
             sampling_params=kwargs,

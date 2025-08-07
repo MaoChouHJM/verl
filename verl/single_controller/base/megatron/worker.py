@@ -83,11 +83,13 @@ class MegatronWorker(Worker):
             "eos_token_id": self.tokenizer.eos_token_id,
             "pad_token_id": self.tokenizer.pad_token_id,
         }
+        hf_config.max_position_embeddings = 163840
         override_config_kwargs.update(override_model_config.get("model_config", {}))
         self.share_embeddings_and_output_weights = getattr(hf_config, "tie_word_embeddings", False)
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
         self.architectures = getattr(hf_config, "architectures", None)
         if self.rank == 0:
+            print(f"Override Model config: {override_model_config}")
             print(f"Model config after override: {hf_config}")
         tf_config = hf_to_mcore_config(hf_config, dtype, **override_transformer_config)
 

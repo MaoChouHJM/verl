@@ -1,16 +1,24 @@
 set -x
-
-DIST_CKPT_PATH="/mmu_mllm_hdd_2/lilaiyi/718/kai-megatron/output/save/dist_ckpt_step27000/iter_0000001"
-LLM="/mmu_mllm_hdd_2/zhouyang1o2/output1/Keye/0.9.3/Stage2/8b/slowfast-0721-0717-v2/step27000/global_step27000/converted"
+ln -s /mmu_mllm_hdd /mllm_hdd
+DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/new_converted_hf"
+LLM="/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/AutoThink/20250801.new_pretrain_mpo_cotmix_addmore_256gpu/output/v0-20250731-203710/checkpoint-2544"
 HOME=/nlp_group/huangjiaming/
-PWD=$(PWD)
+VAL_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/val_dir"
+TRAIN_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/badcase_newdir"
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
 # 2. run the script
 gsm8k_train_path=$HOME/data/gsm8k/train.parquet
 gsm8k_test_path=/nlp_group/huangjiaming/logits-distill/random_row.parquet
-train_files=$gsm8k_train_path
-test_files=$gsm8k_test_path
+# train_files=$gsm8k_train_path
+# few data
+# test_files=/nlp_group/huangjiaming/data/keye_text_image_rl_data/verl_dataset_debug_text_img.parquet
+# val data with swift
+test_files=/nlp_group/huangjiaming/data/keye_text_image_rl_data/val.parquet
+
+
+bad_cases=/nlp_group/yuanjiawei05/new_logits_distill/bad_case.parquet
+train_files=$bad_cases
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 COMMON_PARAM_OFFLOAD=${COMMON_PARAM_OFFLOAD:-$ALL_OFFLOAD}
@@ -26,7 +34,7 @@ NODES=1
 PP=1
 INFER_TP=1
 
-n_resp_per_prompt=4
+n_resp_per_prompt=8
 project_name='verl_megatron_gsm8k_examples'
 experiment_name='dsv3-32nodes'
 
@@ -39,6 +47,9 @@ if [ "$rollout_mode" = "async" ]; then
 fi
 
 export HYDRA_FULL_ERROR=1
+
+# rm data.gen_batch_size
+# modify data.train_batch_size to 32
 
 python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
     ++user_custom_env.USE_SLOW_FAST=True \
@@ -54,18 +65,21 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.return_raw_chat=$return_raw_chat \
-    data.train_batch_size=32 \
-    data.max_prompt_length=5120 \
-    data.max_response_length=3072 \
+    data.trust_remote_code=True \
+    data.train_batch_size=20 \
+    data.max_prompt_length=40960 \
+    data.max_response_length=5120 \
     data.filter_overlong_prompts=False \
     data.truncation='error' \
     data.prompt_key=messages \
-    data.image_key=images \
+    +data.image_key=images \
     data.reward_fn_key=swift_reward_type \
+    +data.validation_shuffle=False \
+    +data.gen_batch_size=20 \
     actor_rollout_ref.model.path=$LLM \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=20 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.use_torch_compile=False \
@@ -75,19 +89,27 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.60 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
-    actor_rollout_ref.rollout.temperature=1.0 \
+    actor_rollout_ref.rollout.temperature=0.0 \
     actor_rollout_ref.rollout.top_p=0.9 \
-    actor_rollout_ref.rollout.top_k=50 \
-    actor_rollout_ref.rollout.repetition_penalty=1.0 \
+    actor_rollout_ref.rollout.top_k=1 \
+    +actor_rollout_ref.rollout.repetition_penalty=1.0 \
+    ++actor_rollout_ref.rollout.debug_dump_val_rollout_result=True \
+    ++actor_rollout_ref.rollout.debug_dump_train_rollout_result=True \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_p=0.9 \
+    actor_rollout_ref.rollout.val_kwargs.top_k=50 \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=False \
+    +actor_rollout_ref.rollout.val_kwargs.repetition_penalty=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$INFER_TP \
     actor_rollout_ref.rollout.free_cache_engine=True \
     +actor_rollout_ref.rollout.override_config.chunked_prefill_size=32768 \
     algorithm.use_kl_in_reward=False \
     reward_model.reward_manager=keye \
     reward_model.launch_reward_fn_async=True \
-    ++reward_model.reward_kwargs.reward_fn_types=\'ModelBaseAccuracyv2,MyFormat\' \
-    ++reward_model.reward_kwargs.model_api_address=\'10.82.121.34,10.82.122.98,10.82.120.218\' \
-    ++reward_model.reward_kwargs.model_api_port=\'8000\' \
+    ++reward_model.reward_kwargs.reward_fn_types=\'ModelBaseAccuracyV2,MyFormat\' \
+    ++reward_model.reward_kwargs.model_api_address=\'10.48.47.83\' \
+    ++reward_model.reward_kwargs.model_api_port=\'8001,8002,8003,8004\' \
     ++reward_model.enable_reward_workers=True \
     trainer.logger=['console'] \
     trainer.project_name=$project_name \
@@ -96,6 +118,9 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     trainer.nnodes=$NODES \
     trainer.save_freq=20 \
     trainer.test_freq=5 \
+    +trainer.validation_data_dir=$VAL_DUMP_DIR \
+    +trainer.val_result_dump_dir=$VAL_DUMP_DIR \
+    +trainer.train_result_dump_dir=$TRAIN_DUMP_DIR \
     actor_rollout_ref.actor.profile.use_profile=False \
     actor_rollout_ref.actor.profile.profile_ranks=[0,1] \
     actor_rollout_ref.actor.profile.step_start=5 \

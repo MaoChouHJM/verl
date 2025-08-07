@@ -65,7 +65,7 @@ class AsyncRewardWorkerManager:
                     unready_ranks.remove(rank)
                     # worker.init_worker.remote()
                     print(f"Async Reward worker {rank} initialized successfully")
-                except Exception:
+                except Exception as e:
                     ray.kill(worker)
                     print(f"Reward worker {rank} failed to initialize: {e}, restarting...")
 
