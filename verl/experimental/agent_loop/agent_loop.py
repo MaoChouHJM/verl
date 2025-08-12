@@ -256,7 +256,7 @@ class AgentLoopWorker:
         self.processor = hf_processor(local_path, trust_remote_code=True)
         self.hf_config = AutoConfig.from_pretrained(local_path, trust_remote_code=True)
 
-        agent_loop_config_path = config.actor_rollout_ref.rollout.agent.agent_loop_config_path
+        agent_loop_config_path = config.actor_rollout_ref.rollout.agent.get("agent_loop_config_path", None)
         if agent_loop_config_path:
             agent_loop_configs = OmegaConf.load(agent_loop_config_path)
             for agent_loop_config in agent_loop_configs:

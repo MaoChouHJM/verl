@@ -1173,7 +1173,8 @@ class RayPPOTrainer:
             report_stat(self.actor_rollout_wg.get_timing_report())
 
         if self.async_rollout_mode == True:
-            report_stat(self.async_rollout_manager.get_timing_report())
+            pass
+            #report_stat(self.async_rollout_manager.get_timing_report())
 
     def fit(self):
         """
