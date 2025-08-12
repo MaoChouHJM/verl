@@ -224,6 +224,7 @@ class KeyeQwen3SlowFastDataset(RLHFDataset):
                     input_ids=input_ids,
                     image_grid_thw=model_inputs.get("image_grid_thw"),
                     video_grid_thw=model_inputs.get("video_grid_thw"),
+                    fast_video_grid_thw=model_inputs.get("fast_video_grid_thw"),
                     spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
                     image_token_id=self.hf_config.image_token_id,
                     video_token_id=self.hf_config.video_token_id,
