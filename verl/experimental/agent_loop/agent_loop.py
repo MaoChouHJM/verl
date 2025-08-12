@@ -309,7 +309,7 @@ class AgentLoopWorker:
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
-            batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(batch), dtype=object)
+            batch.non_tensor_batch["agent_name"] = np.array(["tool_agent"] * len(batch), dtype=object)
 
         if "index" in batch.non_tensor_batch:
             index = batch.non_tensor_batch["index"]
