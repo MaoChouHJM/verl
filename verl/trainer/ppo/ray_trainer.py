@@ -1268,6 +1268,8 @@ class RayPPOTrainer:
                     non_tensor_batch_keys_to_pop.append("agent_name")
                 if "multi_modal_inputs" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_inputs")
+                if "images" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("images")
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
