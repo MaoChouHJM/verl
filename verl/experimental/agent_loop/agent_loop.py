@@ -452,7 +452,7 @@ class AgentLoopWorker:
                         attention_mask=attention_mask.squeeze(0),
                     ).unsqueeze(0)  # (1, 3, seq_len)
                 elif self.hf_config.architectures[0] == "KeyeForConditionalGeneration":
-                    position_ids = self.get_rope_index_func(
+                    position_ids = get_rope_index(
                         input_ids=input_ids,
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
