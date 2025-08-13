@@ -1322,7 +1322,7 @@ class RayPPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     # DEBUG
                     # batch.save_to_disk('/nlp_group/yuanjiawei05/new_logits_distill/before_union_batch.pkl')
-                    gen_batch_output.save_to_disk('/nlp_group/yuanjiawei05/new_logits_distill/before_union_gen_batch.pkl')
+                    # gen_batch_output.save_to_disk('/nlp_group/yuanjiawei05/new_logits_distill/before_union_gen_batch.pkl')
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch:
