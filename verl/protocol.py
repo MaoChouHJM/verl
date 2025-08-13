@@ -124,6 +124,11 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
             assert isinstance(tensor_dict2[key], np.ndarray)
             assert isinstance(tensor_dict1[key], np.ndarray)
             # to properly deal with nan and object type
+            print(f"[DEBUG] at protocol.py, {tensor_dict2.keys()=}, {tensor_dict1.keys()=}")
+            for k, v in tensor_dict2.items():
+                print(f"[DEBUG] dict2 vtype: {k=}, {type(v)=}")
+            for k, v in tensor_dict1.items():
+                print(f"[DEBUG] dict1 vtype: {k=}, {type(v)=}")
             assert pd.DataFrame(tensor_dict2[key]).equals(pd.DataFrame(tensor_dict1[key])), (
                 f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
             )
