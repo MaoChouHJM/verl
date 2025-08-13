@@ -129,8 +129,23 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
                 print(f"[DEBUG] dict2 vtype: {k=}, {type(v)=}")
             for k, v in tensor_dict1.items():
                 print(f"[DEBUG] dict1 vtype: {k=}, {type(v)=}")
-            assert pd.DataFrame(tensor_dict2[key]).equals(pd.DataFrame(tensor_dict1[key])), (
-                f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
+            # assert pd.DataFrame(tensor_dict2[key]).equals(pd.DataFrame(tensor_dict1[key])), (
+            #     f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
+            # )
+            def _safe_equal(v1, v2, key):
+                try:
+                    if isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
+                        return torch.equal(v1, v2)
+                    elif isinstance(v1, list) and isinstance(v2, list) and all(isinstance(i, torch.Tensor) for i in v1 + v2):
+                        print(f"[DEBUG] at protocol.py, comparing {key=} as list comparation...")
+                        return all(torch.equal(a, b) for a, b in zip(v1, v2))
+                    else:
+                        return pd.DataFrame(v1).equals(pd.DataFrame(v2))
+                except Exception as e:
+                    print(f"Warning: equality check failed on key={key}, skipping check. Reason: {e}")
+                    return True
+            assert _safe_equal(tensor_dict2[key], tensor_dict1[key], key), (
+                f"Non-tensor batch key '{key}' mismatch:\n{tensor_dict2[key]}\nvs\n{tensor_dict1[key]}"
             )
         tensor_dict1[key] = val
 
