@@ -64,10 +64,10 @@ class ToolAgentLoop(AgentLoopBase):
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
-        # image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
-        image_data = copy.deepcopy(kwargs.get("images", {}))
-        image_data = [image_data]
-        print(f"[DEBUG] at tool_agent_loop.py, {image_data=}")
+        image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
+        image_data_url = copy.deepcopy(kwargs.get("images", {}))
+        image_data_url = [image_data_url]
+        print(f"[DEBUG] at tool_agent_loop.py, {image_data_url=}")
         # TODO(huangjiaming): support video data
         video_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("video", None))
         metrics = {}
@@ -104,7 +104,7 @@ class ToolAgentLoop(AgentLoopBase):
         while True:
             with simple_timer("generate_sequences", metrics):
                 response_ids = await self.server_manager.generate(
-                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
+                    request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data_url
                 )
             prompt_ids += response_ids
             response_mask += [1] * len(response_ids)

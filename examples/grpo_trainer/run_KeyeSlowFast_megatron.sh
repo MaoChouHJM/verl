@@ -50,14 +50,14 @@ export HYDRA_FULL_ERROR=1
 
 # rm data.gen_batch_size
 # modify data.train_batch_size to 32
+    # ++user_custom_env.MIN_PIXELS=102400 \
+    # ++user_custom_env.MAX_PIXELS=3010560 \
+    # ++user_custom_env.KEYE_IMAGE_FACTOR=28 \
+    # ++user_custom_env.FPS_MAX_FRAMES=32 \
+    # ++user_custom_env.VIDEO_TOTAL_PIXELS=6422528 \
 
 python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
     ++user_custom_env.USE_SLOW_FAST=True \
-    ++user_custom_env.MIN_PIXELS=102400 \
-    ++user_custom_env.MAX_PIXELS=3010560 \
-    ++user_custom_env.KEYE_IMAGE_FACTOR=28 \
-    ++user_custom_env.FPS_MAX_FRAMES=32 \
-    ++user_custom_env.VIDEO_TOTAL_PIXELS=6422528 \
     algorithm.adv_estimator=grpo \
     data.custom_cls.name=KeyeQwen3SlowFastDataset \
     data.custom_cls.path=$PWD/verl/utils/dataset/keye_qwen3_slowfast_dataset.py \
