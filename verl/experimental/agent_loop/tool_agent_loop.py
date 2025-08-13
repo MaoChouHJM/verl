@@ -83,7 +83,7 @@ class ToolAgentLoop(AgentLoopBase):
                 ),
             )
             model_inputs = self.processor(text=[raw_prompt], images=image_data, videos=video_data, return_tensors="pt")
-            print(f"[DEBUG] at tool_agent_loop, {messages=}, {raw_prompt=}")
+            # print(f"[DEBUG] at tool_agent_loop, {messages=}, {raw_prompt=}")
             prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
         else:
             prompt_ids = await self.loop.run_in_executor(

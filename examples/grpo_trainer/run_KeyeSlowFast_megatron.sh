@@ -4,7 +4,7 @@ DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/new_converted_hf"
 LLM="/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/AutoThink/20250801.new_pretrain_mpo_cotmix_addmore_256gpu/output/v0-20250731-203710/checkpoint-2544"
 HOME=/nlp_group/huangjiaming/
 VAL_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/val_dir"
-TRAIN_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/badcase_newdir"
+TRAIN_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/allbad_newdir"
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
 # 2. run the script
@@ -17,7 +17,7 @@ gsm8k_test_path=/nlp_group/huangjiaming/logits-distill/random_row.parquet
 test_files=/nlp_group/huangjiaming/data/keye_text_image_rl_data/val.parquet
 
 
-bad_cases=/nlp_group/yuanjiawei05/new_logits_distill/symmetry.parquet
+bad_cases=/nlp_group/yuanjiawei05/new_logits_distill/bad_case.parquet
 train_files=$bad_cases
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
@@ -66,7 +66,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     data.val_files="$test_files" \
     data.return_raw_chat=$return_raw_chat \
     data.trust_remote_code=True \
-    data.train_batch_size=1 \
+    data.train_batch_size=20 \
     data.max_prompt_length=40960 \
     data.max_response_length=5120 \
     data.filter_overlong_prompts=False \
@@ -75,11 +75,11 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     +data.image_key=images \
     data.reward_fn_key=swift_reward_type \
     +data.validation_shuffle=False \
-    +data.gen_batch_size=1 \
+    +data.gen_batch_size=20 \
     actor_rollout_ref.model.path=$LLM \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=1 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=20 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.use_torch_compile=False \
