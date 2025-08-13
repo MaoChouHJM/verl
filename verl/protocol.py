@@ -167,7 +167,6 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
             for i, mmi in enumerate(multi_modal_inputs):
                 print(f"\n--- Element {i} ---")
                 print(f"Type: {type(mmi)}")
-                
                 if mmi is None:
                     print("Value: None")
                 elif hasattr(mmi, 'keys'):  # 如果是字典类型
@@ -187,7 +186,7 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
             
             assert pd.DataFrame(tensor_dict2[key]).equals(pd.DataFrame(tensor_dict1[key])), (
                 f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
-            # )
+            )
             # def _safe_equal(v1, v2, key):
             #     try:
             #         if isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
