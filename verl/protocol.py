@@ -124,84 +124,9 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
             assert isinstance(tensor_dict2[key], np.ndarray)
             assert isinstance(tensor_dict1[key], np.ndarray)
             # to properly deal with nan and object type
-            # print(f"[DEBUG] at protocol.py, {tensor_dict2.keys()=}, {tensor_dict1.keys()=}")
-            # for k, v in tensor_dict2.items():
-            #     print(f"[DEBUG] dict2 vtype: {k=}, {type(v)=}")
-            # for k, v in tensor_dict1.items():
-            #     print(f"[DEBUG] dict1 vtype: {k=}, {type(v)=}")
-            multi_modal_inputs = tensor_dict1["multi_modal_inputs"]
-
-            print(f"multi_modal_inputs type: {type(multi_modal_inputs)}")
-            print(f"multi_modal_inputs shape: {multi_modal_inputs.shape}")
-            print(f"multi_modal_inputs dtype: {multi_modal_inputs.dtype}")
-
-            # 检查每个元素
-            for i, mmi in enumerate(multi_modal_inputs):
-                print(f"\n--- Element {i} ---")
-                print(f"Type: {type(mmi)}")
-                
-                if mmi is None:
-                    print("Value: None")
-                elif hasattr(mmi, 'keys'):  # 如果是字典类型
-                    print(f"Keys: {list(mmi.keys())}")
-                    for key, value in mmi.items():
-                        print(f"  {key}: type={type(value)}")
-                        if hasattr(value, 'shape'):
-                            print(f"    shape={value.shape}")
-                        if hasattr(value, 'dtype'):
-                            print(f"    dtype={value.dtype}")
-                elif hasattr(mmi, '__len__'):  # 如果是列表或其他可迭代对象
-                    print(f"Length: {len(mmi)}")
-                    for j, item in enumerate(mmi):
-                        print(f"  [{j}]: type={type(item)}")
-                        if hasattr(item, 'shape'):
-                            print(f"      shape={item.shape}")
-
-            multi_modal_inputs = tensor_dict2["multi_modal_inputs"]
-
-            print(f"multi_modal_inputs2 type: {type(multi_modal_inputs)}")
-            print(f"multi_modal_inputs2 shape: {multi_modal_inputs.shape}")
-            print(f"multi_modal_inputs2 dtype: {multi_modal_inputs.dtype}")
-
-            # 检查每个元素
-            for i, mmi in enumerate(multi_modal_inputs):
-                print(f"\n--- Element {i} ---")
-                print(f"Type: {type(mmi)}")
-                if mmi is None:
-                    print("Value: None")
-                elif hasattr(mmi, 'keys'):  # 如果是字典类型
-                    print(f"Keys: {list(mmi.keys())}")
-                    for key, value in mmi.items():
-                        print(f"  {key}: type={type(value)}")
-                        if hasattr(value, 'shape'):
-                            print(f"    shape={value.shape}")
-                        if hasattr(value, 'dtype'):
-                            print(f"    dtype={value.dtype}")
-                elif hasattr(mmi, '__len__'):  # 如果是列表或其他可迭代对象
-                    print(f"Length: {len(mmi)}")
-                    for j, item in enumerate(mmi):
-                        print(f"  [{j}]: type={type(item)}")
-                        if hasattr(item, 'shape'):
-                            print(f"      shape={item.shape}")
-            
             assert pd.DataFrame(tensor_dict2[key]).equals(pd.DataFrame(tensor_dict1[key])), (
                 f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
             )
-            # def _safe_equal(v1, v2, key):
-            #     try:
-            #         if isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
-            #             return torch.equal(v1, v2)
-            #         elif isinstance(v1, list) and isinstance(v2, list) and all(isinstance(i, torch.Tensor) for i in v1 + v2):
-            #             print(f"[DEBUG] at protocol.py, comparing {key=} as list comparation...")
-            #             return all(torch.equal(a, b) for a, b in zip(v1, v2))
-            #         else:
-            #             return pd.DataFrame(v1).equals(pd.DataFrame(v2))
-            #     except Exception as e:
-            #         print(f"Warning: equality check failed on key={key}, skipping check. Reason: {e}")
-            #         return True
-            # assert _safe_equal(tensor_dict2[key], tensor_dict1[key], key), (
-            #     f"Non-tensor batch key '{key}' mismatch:\n{tensor_dict2[key]}\nvs\n{tensor_dict1[key]}"
-            # )
         tensor_dict1[key] = val
 
     return tensor_dict1

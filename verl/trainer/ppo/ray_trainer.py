@@ -1266,6 +1266,8 @@ class RayPPOTrainer:
                     non_tensor_batch_keys_to_pop.append("interaction_kwargs")
                 if "agent_name" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("agent_name")
+                if "multi_modal_inputs" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("multi_modal_inputs")
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
