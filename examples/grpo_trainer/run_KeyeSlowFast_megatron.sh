@@ -4,7 +4,7 @@ DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/new_converted_hf"
 LLM="/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/AutoThink/20250801.new_pretrain_mpo_cotmix_addmore_256gpu/output/v0-20250731-203710/checkpoint-2544"
 HOME=/nlp_group/huangjiaming/
 VAL_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/val_dir"
-TRAIN_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/badcase_newdir"
+TRAIN_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/train_dir"
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
 # 2. run the script
@@ -18,7 +18,7 @@ test_files=/nlp_group/huangjiaming/data/keye_text_image_rl_data/val.parquet
 
 
 bad_cases=/nlp_group/yuanjiawei05/new_logits_distill/bad_case.parquet
-train_files=$bad_cases
+train_files=$test_files
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 COMMON_PARAM_OFFLOAD=${COMMON_PARAM_OFFLOAD:-$ALL_OFFLOAD}
