@@ -4,7 +4,7 @@ DIST_CKPT_PATH="/nlp_group/yuanjiawei05/new_logits_distill/new_converted_hf"
 LLM="/mmu_mllm_hdd_2/wenbin/SFT/Keye-8B/AutoThink/20250801.new_pretrain_mpo_cotmix_addmore_256gpu/output/v0-20250731-203710/checkpoint-2544"
 HOME=/nlp_group/huangjiaming/
 VAL_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/val_dir"
-TRAIN_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/train_dir"
+TRAIN_DUMP_DIR="/nlp_group/yuanjiawei05/new_logits_distill/singlebad_dir"
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
 # 2. run the script
@@ -91,9 +91,9 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.60 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
-    actor_rollout_ref.rollout.temperature=0.0 \
+    actor_rollout_ref.rollout.temperature=1 \
     actor_rollout_ref.rollout.top_p=0.9 \
-    actor_rollout_ref.rollout.top_k=1 \
+    actor_rollout_ref.rollout.top_k=50 \
     +actor_rollout_ref.rollout.repetition_penalty=1.0 \
     ++actor_rollout_ref.rollout.debug_dump_val_rollout_result=True \
     ++actor_rollout_ref.rollout.debug_dump_train_rollout_result=True \
