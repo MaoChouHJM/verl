@@ -1321,8 +1321,8 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     # DEBUG
-                    print(f'hjm_dbg {batch=}', flush=True)
-                    print(f'hjm_dbg {gen_batch_output=}', flush=True)
+                    # print(f'hjm_dbg {batch=}', flush=True)
+                    # print(f'hjm_dbg {gen_batch_output=}', flush=True)
                     #batch.save_to_disk('/nlp_group/yuanjiawei05/new_logits_distill/before_union_batch.pkl')
                     #gen_batch_output.save_to_disk('/nlp_group/yuanjiawei05/new_logits_distill/before_union_gen_batch.pkl')
                     batch = batch.union(gen_batch_output)
