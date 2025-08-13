@@ -87,6 +87,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.mode=$rollout_mode \
+    actor_rollout_ref.rollout.load_format=auto \
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.60 \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
