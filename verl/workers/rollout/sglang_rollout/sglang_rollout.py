@@ -1006,21 +1006,22 @@ class SGLangRollout(BaseRollout):
         kwargs = sampling_params.copy()
         kwargs["max_new_tokens"] = max_new_tokens
         kwargs["n"] = 1  # group size is supported in preprocess
-        # from datetime import datetime
-        # import pickle
-        # params_data = {
-        #     'input_ids': generation_prompt_ids,  # list类型
-        #     'sampling_params': kwargs,           # dict类型
-        #     'return_logprob': False,            # bool类型
-        #     'image_data': image_data,           # list类型
-        #     'timestamp': datetime.now().isoformat(),  # 添加时间戳
-        # }
-
-        # pkl_filename = f'/nlp_group/yuanjiawei05/new_logits_distill/engine_input/engine_params_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
-        # with open(pkl_filename, 'wb') as f:
-        #     pickle.dump(params_data, f)
-            
-        # print(f"[DEBUG] sglang engine params dumped to: {pkl_filename}")
+        from datetime import datetime
+        import pickle
+        if self._tp_rank == 0:
+            input_text = self.processing_class.decode(generation_prompt_ids)
+            params_data = {
+                'input_ids': generation_prompt_ids,
+                'input_text': input_text,
+                'sampling_params': kwargs,
+                'return_logprob': False,
+                'image_data': image_data,
+            }
+            pkl_filename = f'/nlp_group/yuanjiawei05/new_logits_distill/engine_input/engine_params_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
+            with open(pkl_filename, 'wb') as f:
+                pickle.dump(params_data, f)
+                
+            print(f"[DEBUG] sglang engine params dumped to: {pkl_filename}")
 
         output = await self._engine.async_generate(
             input_ids=generation_prompt_ids,
