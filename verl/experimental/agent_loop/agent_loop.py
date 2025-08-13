@@ -425,11 +425,11 @@ class AgentLoopWorker:
                 else:
                     raise NotImplementedError(f"not implement get_rope_index for {self.hf_config['architectures'][0]}")
 
-                images = output.multi_modal_data.get("image", [])
-                videos = output.multi_modal_data.get("video", [])
+                images = output.multi_modal_data.get("image", None)
+                videos = output.multi_modal_data.get("video", None)
 
                 current_text = self.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
-                multi_modal_inputs = self.processor(text=[current_text], images=images, videos=None, return_tensors="pt")
+                multi_modal_inputs = self.processor(text=[current_text], images=images, videos=videos, return_tensors="pt")
                 multi_modal_inputs.pop("input_ids", None)
                 multi_modal_inputs.pop("attention_mask", None)
 
