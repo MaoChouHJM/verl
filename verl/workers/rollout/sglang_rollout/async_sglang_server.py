@@ -74,6 +74,7 @@ class AsyncSglangServer(AsyncServerBase):
         request_id: str,
         image_data: Optional[list[Any]] = None,
     ) -> list[int]:
+        print(f"[DEBUG] at async_sglang_server.py, {image_data=}")
         return await self.master_worker.generate.remote(prompt_ids, sampling_params, request_id, image_data=image_data)
 
     async def wake_up(self):

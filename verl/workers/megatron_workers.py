@@ -769,8 +769,8 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         return ret
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD, blocking=False)
-    async def generate(self, prompt_ids: List[int], sampling_params: Dict[str, Any], request_id: str) -> List[int]:
-        ret = await self.rollout.generate(prompt_ids, sampling_params, request_id)
+    async def generate(self, prompt_ids: List[int], sampling_params: Dict[str, Any], request_id: str, image_data: Optional[list[Any]] = None,) -> List[int]:
+        ret = await self.rollout.generate(prompt_ids, sampling_params, request_id, image_data)
         return ret
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
