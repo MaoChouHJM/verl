@@ -18,6 +18,7 @@ the class for Worker
 import os
 import socket
 import time
+import warnings
 import wandb
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -47,33 +48,28 @@ class DistGlobalInfo:
 
 
 class WorkerHelper:
-    def _get_node_ip(self):
-        def get_node_ip_by_sdk():
-            if os.getenv("WG_BACKEND", None) == "ray":
-                import ray
+    @staticmethod
+    def _get_node_ip():
+        if os.getenv("WG_BACKEND", None) == "ray":
+            return ray.util.get_node_ip_address()
+        else:
+            raise NotImplementedError("WG_BACKEND now just support ray mode.")
 
-                return ray._private.services.get_node_ip_address()
-            else:
-                raise NotImplementedError("WG_BACKEND now just support ray mode.")
-
-        host_ipv4 = os.getenv("MY_HOST_IP", None)
-        host_ipv6 = os.getenv("MY_HOST_IPV6", None)
-        host_ip_by_env = host_ipv4 or host_ipv6
-        host_ip_by_sdk = get_node_ip_by_sdk()
-
-        host_ip = host_ip_by_env or host_ip_by_sdk
-        return host_ip
-
-    def _get_free_port(self):
+    @staticmethod
+    def _get_free_port():
         with socket.socket() as sock:
             sock.bind(("", 0))
             return sock.getsockname()[1]
 
     def get_availale_master_addr_port(self):
-        return self._get_node_ip(), str(self._get_free_port())
+        warnings.warn(
+            "This function is deprecated due to typo in name; Please use `get_available_master_addr_port` instead",
+            stacklevel=2,
+        )
+        return self.get_available_master_addr_port()
 
-    def _get_pid(self):
-        return os.getpid()
+    def get_available_master_addr_port(self):
+        return self._get_node_ip().strip("[]"), str(self._get_free_port())
 
 
 # we assume that in each WorkerGroup, there is a Master Worker
@@ -105,6 +101,53 @@ class Worker(WorkerHelper):
 
         return instance
 
+    def _register_dispatch_collect_info(self, mesh_name: str, dp_rank: int, is_collect: bool):
+        """Register the dp_rank for a given mesh name. This function is meant to be called by the worker
+
+        Args:
+            mesh_name (str):
+                Name of the mesh to register dp_rank for.
+            dp_rank (int):
+                dp_rank to register for the given mesh name.
+            is_collect (bool):
+                Whether the dp_rank is used for collect.
+        """
+        if mesh_name in self.__dispatch_dp_rank or mesh_name in self.__collect_dp_rank:
+            raise ValueError(f"mesh_name {mesh_name} has been registered")
+        self.__dispatch_dp_rank[mesh_name] = dp_rank
+        self.__collect_dp_rank[mesh_name] = is_collect
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def _query_dispatch_info(self, mesh_name: str):
+        """Query the dispatch info for a given mesh name.
+
+        Args:
+            mesh_name (str):
+                Name of the mesh to query dispatch info for.
+
+        Returns:
+            int:
+                The dp_rank for the given mesh name.
+        """
+        assert mesh_name in self.__dispatch_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
+        # note that each rank store its own dp_rank
+        return self.__dispatch_dp_rank[mesh_name]
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def _query_collect_info(self, mesh_name: str):
+        """Query the collect info for a given mesh name.
+
+        Args:
+            mesh_name (str):
+                Name of the mesh to query collect info for.
+
+        Returns:
+            bool:
+                Whether the dp_rank is used for collect.
+        """
+        assert mesh_name in self.__collect_dp_rank, f"{mesh_name} is not registered in {self.__class__.__name__}"
+        return self.__collect_dp_rank[mesh_name]
+
     def _configure_before_init(self, register_center_name: str, rank: int):
         """Configure worker settings before initialization.
 
@@ -117,7 +160,7 @@ class Worker(WorkerHelper):
         assert isinstance(rank, int), f"rank must be int, instead of {type(rank)}"
 
         if rank == 0:
-            master_addr, master_port = self.get_availale_master_addr_port()
+            master_addr, master_port = self.get_available_master_addr_port()
             rank_zero_info = {
                 "MASTER_ADDR": master_addr,
                 "MASTER_PORT": master_port,
@@ -188,6 +231,8 @@ class Worker(WorkerHelper):
         self._configure_with_store(store=store)
 
         self.fused_worker_dict = {}
+        self.__dispatch_dp_rank = {}
+        self.__collect_dp_rank = {}
 
     def get_fused_worker_by_name(self, worker_name: str):
         """Get a fused worker by its name.
@@ -235,11 +280,11 @@ class Worker(WorkerHelper):
             else:
                 cuda_val = val
                 os.environ["CUDA_VISIBLE_DEVICES"] = val
+                # os.environ["HIP_VISIBLE_DEVICES"] = val
 
         if rocr_val:
             # You must take care if both HIP/CUDA and ROCR env vars are set as they have
-            # different meanings. Both env vars accept either a list of ints or a
-            # list of UUIDs. The ROCR env var is processed first which then reduces
+            # different meanings. The ROCR env var is processed first which then reduces
             # the number of GPUs that HIP can select from.
             # https://github.com/pytorch/pytorch/pull/144026
             # To avoid the complexity of this, we simply gives out error if both are set
@@ -262,7 +307,7 @@ class Worker(WorkerHelper):
             os.environ["LOCAL_RANK"] = local_rank
             get_torch_device().set_device(int(local_rank))
 
-    def _configure_with_store(self, store: Dict):
+    def _configure_with_store(self, store: dict):
         """
         This function should only be called inside by WorkerGroup
         """
@@ -345,7 +390,6 @@ class Worker(WorkerHelper):
                 assert name not in self.timing_data
                 self.timing_data[name] = v
                 #wandb.log({name : v})
-
 
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

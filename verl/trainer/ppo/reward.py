@@ -12,14 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import multiprocessing
 import os
+import sys
+import warnings
 from functools import partial
+from typing import Any, Optional
 
 import ray
+import torch
+from omegaconf import DictConfig
 
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
+from verl.workers.reward_manager import get_reward_manager_cls
+from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
 
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
@@ -31,9 +39,25 @@ def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
     return raw_fn(*args, **merged_kwargs)
 
 
-def get_custom_reward_fn(config):
-    import importlib.util
-    import sys
+def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
+    """Load and return a custom reward function from external file.
+
+    Dynamically imports a reward function from a specified file path and wraps
+    it with additional keyword arguments from the configuration.
+
+    Args:
+        config (dict): Configuration dictionary containing custom_reward_function
+                      settings with 'path', 'name', and 'reward_kwargs' fields.
+
+    Returns:
+        callable or None: Wrapped reward function with merged kwargs, or None
+                         if no custom reward function is configured.
+
+    Raises:
+        FileNotFoundError: If the specified reward function file doesn't exist.
+        RuntimeError: If there's an error loading the module from file.
+        AttributeError: If the specified function name isn't found in the module.
+    """
 
     reward_fn_config = config.get("custom_reward_function") or {}
     file_path = reward_fn_config.get("path")
@@ -44,14 +68,17 @@ def get_custom_reward_fn(config):
         raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
 
     spec = importlib.util.spec_from_file_location("custom_module", file_path)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     try:
         sys.modules["custom_module"] = module
+        assert spec.loader is not None
         spec.loader.exec_module(module)
     except Exception as e:
         raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
 
     function_name = reward_fn_config.get("name")
+    assert function_name is not None
     if not hasattr(module, function_name):
         raise AttributeError(f"Reward function '{function_name}' not found in '{file_path}'.")
 
@@ -69,8 +96,30 @@ def get_custom_reward_fn(config):
     return wrapped_fn
 
 
-def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
-    compute_score = None
+def load_reward_manager(
+    config: DictConfig, tokenizer: Any, num_examine: int, **reward_kwargs: Any
+) -> AbstractRewardManager:
+    """
+    Load and initialize a reward manager based on the configuration.
+
+    Args:
+        config: PPO trainer configuration object containing reward_model fields.
+        tokenizer: Tokenizer object used for processing text.
+        num_examine: Number of samples to examine.
+        **reward_kwargs: Additional keyword arguments for the reward manager.
+
+    Returns:
+        An instance of the specified reward manager class.
+    """
+
+    # The list of pre-defined reward managers are defined in `verl/workers/reward_manager/`:
+    # naive: NaiveRewardManager
+    # prime: PrimeRewardManager
+    # batch: BatchRewardManager
+    # dapo: DAPORewardManager
+    # Note(haibin.lin): For custom reward managers, please make sure they are imported and
+    # registered via `verl.workers.reward_manager.register`
+    # By default reward_manager is set to naive (NaiveRewardManager)
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
     if reward_manager_name == "naive":
         from verl.workers.reward_manager import NaiveRewardManager
@@ -104,7 +153,7 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     )
 
 
-def compute_reward(data: DataProto, reward_fn):
+def compute_reward(data: DataProto, reward_fn: AbstractRewardManager) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute reward for a batch of data.
     Args:
@@ -126,10 +175,19 @@ def compute_reward(data: DataProto, reward_fn):
 
 
 @ray.remote(num_cpus=1)
-def compute_reward_async(data: DataProto, config, tokenizer):
+def compute_reward_async(data: DataProto, config=None, tokenizer=None, reward_fn=None):
     """
     Load the reward manager and compute the reward for a batch of data.
     This is meant to be run in a separate Ray worker.
     """
-    reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
+    if reward_fn is None:
+        assert config is not None and tokenizer is not None, (
+            "config and tokenizer must not be None when reward_fn is None"
+        )
+
+        warnings.warn("using config and tokenizer with compute_reward_async is deprecated", stacklevel=2)
+        reward_fn = load_reward_manager(
+            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+        )
+
     return compute_reward(data, reward_fn)

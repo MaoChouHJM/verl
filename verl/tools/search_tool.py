@@ -19,16 +19,17 @@ import os
 import threading
 from contextlib import ExitStack
 from enum import Enum
-from typing import Any, Callable, Optional, Tuple, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 from uuid import uuid4
 
 import ray
 import ray.actor
 
 from verl.tools.utils.search_r1_like_utils import perform_single_search_batch
+from verl.utils.rollout_trace import rollout_trace_op
 
 from .base_tool import BaseTool
-from .schemas import OpenAIFunctionToolSchema
+from .schemas import OpenAIFunctionToolSchema, ToolResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -184,7 +185,7 @@ class SearchTool(BaseTool):
         """Return the OpenAI tool schema."""
         return self.tool_schema
 
-    async def create(self, instance_id: Optional[str] = None, **kwargs) -> str:
+    async def create(self, instance_id: Optional[str] = None, **kwargs) -> tuple[str, ToolResponse]:
         """Create a tool instance.
 
         Args:
@@ -192,6 +193,7 @@ class SearchTool(BaseTool):
 
         Returns:
             The instance id of the tool.
+            tool_creation_response: The response of the tool when creating the instance.
         """
         if instance_id is None:
             instance_id = str(uuid4())
@@ -199,7 +201,7 @@ class SearchTool(BaseTool):
             "response": "",
             "reward": [],
         }
-        return instance_id
+        return instance_id, ToolResponse()
 
     def execute_search(self, instance_id: str, query_list: list, retrieval_service_url: str, topk: int, timeout: int):
         """Execute search operation using retrieval service.
@@ -224,7 +226,8 @@ class SearchTool(BaseTool):
         logger.debug(f"Search result for instance {instance_id}: {result_text}")
         return result_text, metadata
 
-    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> Tuple[str, float, dict]:
+    @rollout_trace_op
+    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[ToolResponse, float, dict]:
         """Execute the search tool.
 
         Args:
@@ -242,7 +245,7 @@ class SearchTool(BaseTool):
         if not query_list_from_params or not isinstance(query_list_from_params, list):
             error_msg = "Error: 'query_list' is missing, empty, or not a list in parameters."
             logger.error(f"[SearchTool] {error_msg} Received parameters: {parameters}")
-            return json.dumps({"result": error_msg}), 0.0, {}
+            return ToolResponse(text=json.dumps({"result": error_msg})), 0.0, {}
 
         # Execute search using Ray execution pool
         try:
@@ -261,12 +264,12 @@ class SearchTool(BaseTool):
                 "api_request_error": metadata.get("api_request_error"),
             }
 
-            return result_text, 0.0, metrics
+            return ToolResponse(text=result_text), 0.0, metrics
 
         except Exception as e:
             error_result = json.dumps({"result": f"Search execution failed: {e}"})
             logger.error(f"[SearchTool] Execution failed: {e}")
-            return error_result, 0.0, {"error": str(e)}
+            return ToolResponse(text=error_result), 0.0, {"error": str(e)}
 
     async def calc_reward(self, instance_id: str, **kwargs) -> str:
         return self._instance_dict[instance_id]["reward"]

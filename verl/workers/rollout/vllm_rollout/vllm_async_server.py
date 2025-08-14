@@ -14,14 +14,15 @@
 import logging
 import os
 import pickle
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional
 
 import ray
 import zmq
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from vllm import SamplingParams
+from vllm.config import CompilationConfig, CompilationLevel
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ChatCompletionResponse, ErrorResponse
@@ -63,7 +64,7 @@ def _get_model_runner_workers(vllm_config, init_ray: bool = True):
         f"{vllm_dp_size} * vllm_tp_size: {vllm_tp_size} = {vllm_dp_size * vllm_tp_size} is expected."
     )
 
-    def get_pg_index_and_local_rank(actor_name) -> Tuple[int, int]:
+    def get_pg_index_and_local_rank(actor_name) -> tuple[int, int]:
         fields = actor_name.split(":")
         assert len(fields) == 2, f"invalid actor name: {actor_name}"
         pg_index, local_rank = int(fields[0].split("_")[-1]), int(fields[1])
@@ -72,7 +73,7 @@ def _get_model_runner_workers(vllm_config, init_ray: bool = True):
     # sort actor names by pg_index and local_rank
     actor_names = sorted(actor_names, key=get_pg_index_and_local_rank)
     actor_names = actor_names[vllm_dp_rank * vllm_tp_size : (vllm_dp_rank + 1) * vllm_tp_size]
-    workers: List[WorkerWrapperBase] = [ray.get_actor(actor_name) for actor_name in actor_names]
+    workers: list[WorkerWrapperBase] = [ray.get_actor(actor_name) for actor_name in actor_names]
     print(f"instance_id: {vllm_config.instance_id} initializes with external actors: {actor_names}")
 
     return workers
@@ -100,11 +101,11 @@ class ExternalRayDistributedExecutor(Executor):
 
     def collective_rpc(
         self,
-        method: Union[str, Callable],
+        method: str | Callable,
         timeout: Optional[float] = None,
-        args: Tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-    ) -> List[Any]:
+        args: tuple = (),
+        kwargs: Optional[dict[str, Any]] = None,
+    ) -> list[Any]:
         # TODO(wuxibin): support ray compiled graph
         if isinstance(method, str):
             sent_method = method
@@ -149,11 +150,11 @@ class ExternalZeroMQDistributedExecutor(Executor):
 
     def collective_rpc(
         self,
-        method: Union[str, Callable],
+        method: str | Callable,
         timeout: Optional[float] = None,
-        args: Tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-    ) -> List[Any]:
+        args: tuple = (),
+        kwargs: Optional[dict[str, Any]] = None,
+    ) -> list[Any]:
         if isinstance(method, str):
             sent_method = method
         else:
@@ -241,6 +242,18 @@ class AsyncvLLMServer(AsyncServerBase):
         else:
             distributed_executor_backend = None
 
+        compilation_config = {}
+
+        cudagraph_capture_sizes = config.get("cudagraph_capture_sizes")
+        # enforce_eager must be False to use cudagraph
+        if not config.enforce_eager and cudagraph_capture_sizes:
+            if isinstance(cudagraph_capture_sizes, ListConfig):
+                compilation_config["compilation_config"] = CompilationConfig(
+                    level=CompilationLevel.PIECEWISE, cudagraph_capture_sizes=cudagraph_capture_sizes
+                )
+            else:
+                logger.warning(f"cudagraph_capture_sizes must be a list, but got {cudagraph_capture_sizes}")
+
         engine_args = AsyncEngineArgs(
             model=local_path,
             enable_sleep_mode=config.free_cache_engine,
@@ -253,6 +266,7 @@ class AsyncvLLMServer(AsyncServerBase):
             disable_custom_all_reduce=True,
             skip_tokenizer_init=False,
             max_model_len=self.max_model_len,
+            max_num_seqs=config.max_num_seqs,
             load_format="auto",
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
@@ -260,6 +274,7 @@ class AsyncvLLMServer(AsyncServerBase):
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
             seed=config.get("seed", 0),
+            **compilation_config,
         )
 
         # init async llm engine
@@ -313,7 +328,16 @@ class AsyncvLLMServer(AsyncServerBase):
             assert isinstance(generator, ChatCompletionResponse)
             return JSONResponse(content=generator.model_dump())
 
-    async def generate(self, prompt_ids: List[int], sampling_params: Dict[str, Any], request_id: str) -> List[int]:
+    async def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+    ) -> list[int]:
+        # TODO: vllm image_data surportting like sglang async server
+        if image_data is not None:
+            raise NotImplementedError("image_data is not supported for vLLM rollout")
         max_tokens = self.max_model_len - len(prompt_ids)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt = TokensPrompt(prompt_token_ids=prompt_ids)
@@ -335,4 +359,4 @@ class AsyncvLLMServer(AsyncServerBase):
         # TODO: https://github.com/vllm-project/vllm/issues/17103
         await self.engine.reset_prefix_cache()
         if self.config.rollout.free_cache_engine:
-            await self.engine.sleep()
+            await self.engine.sleep(level=2)

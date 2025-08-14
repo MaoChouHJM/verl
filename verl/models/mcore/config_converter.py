@@ -17,13 +17,16 @@
 # convert huggingface config to mcore transformer config
 
 
-from unittest import removeResult
+import warnings
+from typing import TypeVar
 
 import torch
 import torch.nn.functional as F
 from megatron.core import parallel_state as mpu
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from transformers import PretrainedConfig
+
+T = TypeVar("T", bound=TransformerConfig)
 
 
 def _get_base_transformer_config(
@@ -132,6 +135,32 @@ def _get_mla_transformer_config(
     return base_config
 
 
+def check_and_construct_configs(original_config: dict, cls: type[T]) -> T:
+    """
+    Check and disable incompatible configurations for older Megatron version.
+
+    Args:
+        original_config (dict): The original model configuration.
+
+    Returns:
+        dict: The updated model configuration with incompatible settings disabled.
+    """
+    removed_keys = []
+    for key in original_config.keys():
+        if not hasattr(cls, key):
+            removed_keys.append(key)
+    if removed_keys:
+        warnings.warn(
+            f"The following keys are not supported in the current Megatron version and will be removed: {removed_keys}",
+            stacklevel=2,
+        )
+        for key in removed_keys:
+            original_config.pop(key)
+
+    print(f"Overridden {cls.__name__} init config: {original_config}")
+    return cls(**original_config)
+
+
 def hf_to_mcore_config_dense(
     hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs
 ) -> TransformerConfig:
@@ -149,8 +178,7 @@ def hf_to_mcore_config_dense(
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)
-    print(f"Overridden TF init config: {args}")
-    return TransformerConfig(**args)
+    return check_and_construct_configs(args, TransformerConfig)
 
 
 def hf_to_mcore_config_qwen2moe(
@@ -184,8 +212,7 @@ def hf_to_mcore_config_qwen2moe(
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)
-    print(f"Overridden TF init config: {args}")
-    return TransformerConfig(**args)
+    return check_and_construct_configs(args, TransformerConfig)
 
 
 def hf_to_mcore_config_mixtral(
@@ -218,8 +245,7 @@ def hf_to_mcore_config_mixtral(
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)
-    print(f"Overridden TF init config: {args}")
-    return TransformerConfig(**args)
+    return check_and_construct_configs(args, TransformerConfig)
 
 
 def hf_to_mcore_config_qwen3moe(
@@ -251,8 +277,7 @@ def hf_to_mcore_config_qwen3moe(
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)
-    print(f"Overridden TF init config: {args}")
-    return TransformerConfig(**args)
+    return check_and_construct_configs(args, TransformerConfig)
 
 
 def hf_to_mcore_config_dpskv3(
@@ -339,92 +364,9 @@ def hf_to_mcore_config_dpskv3(
         overlap_p2p_comm=True,
         **override_transformer_config_kwargs,
     )
-
-    def core_transformer_config_from_args(args):
-        # Config class.
-        config_class = MLATransformerConfig
-        # Translate args to core transformer configuration
-        kw_args = {}
-        import dataclasses
-        for f in dataclasses.fields(config_class):
-            if f.name in args:
-                kw_args[f.name] = args[f.name]
-
-        if 'no_persist_layer_norm' in args:
-            kw_args['persist_layer_norm'] = not args['no_persist_layer_norm']
-
-        if 'apply_layernorm_1p' in args:
-            kw_args['layernorm_zero_centered_gamma'] = args['apply_layernorm_1p']
-
-        if 'norm_epsilon' in args:
-            kw_args['layernorm_epsilon'] = args['norm_epsilon']
-
-        kw_args['deallocate_pipeline_outputs'] = True
-
-        if 'params_dtype' in args:
-            kw_args['pipeline_dtype'] = args['params_dtype']
-
-        if 'overlap_p2p_comm' in args:
-            kw_args['batch_p2p_comm'] = not args['overlap_p2p_comm']
-
-        if 'num_experts' in args:
-            kw_args['num_moe_experts'] = args['num_experts']
-
-        if 'rotary_interleaved' in args:
-            kw_args['rotary_interleaved'] = args['rotary_interleaved']
-
-        if 'decoder_first_pipeline_num_layers' in args:
-            kw_args['num_layers_in_first_pipeline_stage']= args['decoder_first_pipeline_num_layers']
-
-        if 'decoder_last_pipeline_num_layers' in args:
-            kw_args['num_layers_in_last_pipeline_stage']= args['decoder_last_pipeline_num_layers']
-
-        if 'fp8_param_gather' in args:
-            kw_args['fp8_param'] = args['fp8_param_gather']
-
-        if 'swiglu' in args and args['swiglu']:
-            kw_args['activation_func'] = F.silu
-            kw_args['gated_linear_unit'] = True
-            if 'bias_swiglu_fusion' in args:
-                kw_args['bias_activation_fusion'] = args['bias_swiglu_fusion']
-        else:
-            if 'bias_gelu_fusion' in args:
-                kw_args['bias_activation_fusion'] = args['bias_gelu_fusion']
-
-        if 'squared_relu' in args and args['squared_relu']:
-            if 'swiglu' in args:
-                assert not args['swiglu']
-            kw_args['activation_func'] = squared_relu
-
-        if 'init_method_xavier_uniform' in args and args['init_method_xavier_uniform']:
-            kw_args['init_method'] = torch.nn.init.xavier_uniform_
-            kw_args['scaled_init_method'] = torch.nn.init.xavier_uniform_
-
-        if 'group_query_attention' in args and args['group_query_attention']:
-            if 'num_query_groups' in args:
-                kw_args['num_query_groups'] = args['num_query_groups']
-        else:
-            kw_args['num_query_groups'] = None
-
-        if 'config_logger_dir' in args:
-            kw_args['config_logger_dir'] = args['config_logger_dir']
-
-        if 'cp_comm_type' in args and len(args['cp_comm_type']) == 1:
-            kw_args['cp_comm_type'] = args['cp_comm_type'][0]
-
-        if 'is_hybrid_model' in args and args['is_hybrid_model']:
-            kw_args['is_hybrid_model'] = args['is_hybrid_model']
-
-        # Return config.
-        return kw_args
-
-    transformer_config = MLATransformerConfig(**core_transformer_config_from_args(args))
-    import dataclasses
-    import json
-    config_dict = dataclasses.asdict(transformer_config)
-    json_str = json.dumps(config_dict, indent=4, default=lambda o: str(o), sort_keys=True)
-    from verl.utils.logger.aggregate_logger import print_rank_0
-    print_rank_0(f"Overridden MLA TF init config: {json_str}")
+# override_transformer_config_kwargs as kwargs shall never be none
+    args.update(override_transformer_config_kwargs)
+    transformer_config = check_and_construct_configs(args, MLATransformerConfig)
     # MTP
     if "num_nextn_predict_layers" in hf_config:
         transformer_config.mtp_num_layers = hf_config.num_nextn_predict_layers
@@ -450,7 +392,6 @@ def hf_to_mcore_config_qwen2_5_vl(
     )
     # override_transformer_config_kwargs as kwargs shall never be none
     args.update(override_transformer_config_kwargs)
-    print(f"Overridden TF init config: {args}")
     return TransformerConfig(**args)
 
 

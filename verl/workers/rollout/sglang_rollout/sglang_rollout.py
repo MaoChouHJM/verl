@@ -22,14 +22,13 @@ import os
 import time
 from copy import deepcopy
 from json import JSONDecodeError
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Optional
 from uuid import uuid4
 
 import numpy as np
 import sglang.srt.entrypoints.engine
 import torch
 import torch.distributed as dist
-from omegaconf import DictConfig
 from sglang.srt.managers.tokenizer_manager import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
@@ -40,12 +39,10 @@ from sglang.srt.managers.tokenizer_manager import (
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
-    MultiprocessingSerializer,
     assert_pkg_version,
     get_ip,
     get_open_port,
     is_cuda,
-    maybe_set_triton_cache_manager,
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
@@ -64,6 +61,7 @@ from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.net_utils import is_ipv6
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
+from verl.workers.config import RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.schemas import (
     AsyncRolloutRequest,
@@ -104,11 +102,6 @@ def _set_envs_and_config(server_args: ServerArgs):
 
     # Set ulimit
     set_ulimit()
-
-    # Fix triton bugs
-    if server_args.tp_size * server_args.dp_size > 1:
-        # FIXME: remove this after https://github.com/triton-lang/triton/pull/4295 is used as a dependency.
-        maybe_set_triton_cache_manager()
 
     # Check flashinfer version
     if server_args.attention_backend == "flashinfer":
@@ -162,6 +155,7 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
             obj = ResumeMemoryOccupationReqInput(tags=tags)
         return await self.tokenizer_manager.resume_memory_occupation(obj, None)
 
+<<<<<<< HEAD
     async def update_weights_from_tensor(
         self,
         named_tensors: List[Tuple[str, torch.Tensor]],  # noqa: UP006
@@ -181,6 +175,10 @@ class AsyncEngine(sglang.srt.entrypoints.engine.Engine):
             timer={'serial_time': serial_time}
         )
         return await self.tokenizer_manager.update_weights_from_tensor(obj, None)
+=======
+    async def update_weights_from_tensor(self, update_weights_request: UpdateWeightsFromTensorReqInput):
+        return await self.tokenizer_manager.update_weights_from_tensor(update_weights_request, None)
+>>>>>>> main
 
     async def flush_cache(self):
         return await self.tokenizer_manager.flush_cache()
@@ -214,6 +212,22 @@ def _pre_process_inputs(
     return prompt_token_ids[non_pad_index:]
 
 
+def _extract_logprob_from_output(output):
+    """
+    extract log_prob from single sglang inference output
+    """
+
+    def _map_each_response(resp):
+        input_token_logprobs = resp["meta_info"]["input_token_logprobs"]
+        log_probs, output_token_ids = zip(
+            *[(log_prob, token_ids) for log_prob, token_ids, _ in input_token_logprobs[1:]], strict=False
+        )
+        return torch.tensor(output_token_ids), torch.tensor(log_probs)
+
+    output_token_ids, log_probs = _map_each_response(output)
+    return output_token_ids, log_probs
+
+
 # NOTE(linjunrong): adhoc
 def _post_process_outputs(processing_class, output):
     try:
@@ -228,7 +242,9 @@ def _post_process_outputs(processing_class, output):
 
     def _map_each_response(resp):
         output_token_logprobs = resp["meta_info"]["output_token_logprobs"]
-        log_probs, output_token_ids = zip(*[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs])
+        log_probs, output_token_ids = zip(
+            *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
+        )
         return torch.tensor(output_token_ids), torch.tensor(log_probs)
 
     out_map = map(lambda x: _map_each_response(x), output)
@@ -245,7 +261,7 @@ def _post_process_outputs(processing_class, output):
 
 
 def get_tool_call_parser_type(
-    processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
+    processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
 ) -> str:
     items = FunctionCallParser.ToolCallParserEnum.items()
     for parser_type, parser_cls in items:
@@ -272,8 +288,8 @@ class SGLangRollout(BaseRollout):
     def __init__(
         self,
         actor_module: str,
-        config: DictConfig,
-        processing_class: Union[PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin],
+        config: RolloutConfig,
+        processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         model_hf_config,
         port=None,
         trust_remote_code: bool = False,
@@ -395,9 +411,37 @@ class SGLangRollout(BaseRollout):
             self.config.max_model_len >= self.config.prompt_length + self.config.response_length
         ), f"""max_model_len should be greater than total sequence length (prompt_length + response_length): 
             {self.config.max_model_len} >= {self.config.prompt_length} + {self.config.response_length}"""
-        assert model_hf_config.max_position_embeddings >= self.config.max_model_len, (
-            "model context length should be greater than total sequence length"
-        )
+        max_position_embeddings = None
+        if hasattr(model_hf_config, "max_position_embeddings"):
+            max_position_embeddings = model_hf_config.max_position_embeddings
+        elif hasattr(model_hf_config, "llm_config") and hasattr(model_hf_config.llm_config, "max_position_embeddings"):
+            max_position_embeddings = model_hf_config.llm_config.max_position_embeddings
+        elif hasattr(model_hf_config, "text_config") and hasattr(
+            model_hf_config.text_config, "max_position_embeddings"
+        ):
+            max_position_embeddings = model_hf_config.text_config.max_position_embeddings
+        if max_position_embeddings is None:
+            raise ValueError("max_position_embeddings not found in model_hf_config")
+        rope_scaling_config = getattr(model_hf_config, "rope_scaling", None)
+        if not rope_scaling_config:
+            assert max_position_embeddings >= self.config.prompt_length + self.config.response_length, (
+                "model context length should be greater than total sequence length"
+            )
+        else:
+            # handle type where there's a length extend factor
+            # see https://qwen.readthedocs.io/en/latest/deployment/vllm.html#extended-context-support
+            # for using yarn as an example
+            rope_scaling_factor = rope_scaling_config.get("factor", 1.0)
+
+            assert (
+                model_hf_config.max_position_embeddings * rope_scaling_factor
+                >= self.config.prompt_length + self.config.response_length
+            ), (
+                f"model context length should be greater than total sequence length, "
+                f"got rope_scaling_factor={rope_scaling_factor} and "
+                f"max_position_embeddings={model_hf_config.max_position_embeddings}"
+            )
+
         # currently max_assistant_turns stand for max number of tool calls
         if self.config.multi_turn.max_assistant_turns is None:
             self.config.multi_turn.max_assistant_turns = self.config.max_model_len // 3
@@ -426,7 +470,12 @@ class SGLangRollout(BaseRollout):
         tp_size_per_node = self._tp_size // nnodes
         node_rank = self._tp_rank // tp_size_per_node
         first_rank_in_node = self._tp_rank % tp_size_per_node == 0
+<<<<<<< HEAD
         override_rollout_config = OmegaConf.to_container(self.config.get("override_config", OmegaConf.create()))
+=======
+        engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {})
+        attention_backend = engine_kwargs.get("attention_backend", None)
+>>>>>>> main
 
         if first_rank_in_node:
             rank = dist.get_rank()
@@ -457,7 +506,7 @@ class SGLangRollout(BaseRollout):
                 # log_requests_level=2,
                 # max_running_requests=1,
                 mm_attention_backend="fa3",
-                attention_backend="fa3",
+                attention_backend=attention_backend if attention_backend is not None else "fa3",
                 # In async mode, we want token in token out.
                 skip_tokenizer_init=self.config.mode == "async",
                 random_seed = 0,
@@ -644,6 +693,7 @@ class SGLangRollout(BaseRollout):
             for raw_prompt_ids, multi_modal_data in zip(
                 non_tensor_batch.pop("raw_prompt_ids"),
                 non_tensor_batch.pop("multi_modal_data"),
+                strict=True,
             ):
                 sglang_inputs.append(
                     {
@@ -659,14 +709,14 @@ class SGLangRollout(BaseRollout):
                 {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
             ]
 
-        # Ensure token IDs are lists or numpy arrays
         for input_data in sglang_inputs:
-            if isinstance(input_data["prompt_token_ids"], np.ndarray):
-                input_data["prompt_token_ids"] = input_data["prompt_token_ids"].tolist()
-            elif not isinstance(input_data["prompt_token_ids"], list):
+            # Ensure token IDs are lists or numpy arrays
+            if not isinstance(input_data["prompt_token_ids"], list | np.ndarray):
                 raise TypeError(
                     f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}"
                 )
+
+            input_data["prompt_token_ids"] = list(input_data["prompt_token_ids"])
 
         # Extract token IDs and image data for SGLang Engine
         idx_list = [input_data["prompt_token_ids"] for input_data in sglang_inputs]
@@ -779,7 +829,7 @@ class SGLangRollout(BaseRollout):
             batch["rollout_log_probs"] = rollout_log_probs
 
         # free cache engine
-        if self._engine is not None:
+        if self._engine is not None and self._tp_rank == 0:
             loop = asyncio.get_event_loop()
             loop.run_until_complete(self._engine.flush_cache())
 
@@ -851,7 +901,7 @@ class SGLangRollout(BaseRollout):
                         ]
                     )
                     _req.add_tool_response_messages(self.processing_class, [resp for resp, _, _ in tool_call_results])
-                    for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results):
+                    for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
                     if len(_req.input_ids) >= self.config.max_model_len:
                         finish_reason_type = FinishReasonTypeEnum.STOP
@@ -990,7 +1040,19 @@ class SGLangRollout(BaseRollout):
         tool_reward_scores = dict(tool_reward_scores)
         all_rewards = {**tool_reward_scores, **{"user_turn_rewards": user_turn_rewards}}
         _req.finalize(self.processing_class, all_rewards, finish_reason_type)
-
+        if self.config.calculate_log_probs:
+            # 把input_ids输入sglang内生成一遍，并设置max_new_tokens=0，以生成log_probs
+            debug_sampling_params = {**self.sampling_params}
+            debug_sampling_params["max_new_tokens"] = 0
+            output = await self._engine.async_generate(
+                prompt=None,
+                input_ids=_req.input_ids,
+                sampling_params=debug_sampling_params,
+                return_logprob=True,
+                logprob_start_len=0,
+            )
+            # len(input_token_logprobs) = len(input_tokens)-1，because logprob of 1st token is None
+            _req.output_token_ids, _req.rollout_log_probs = _extract_logprob_from_output(output)
         return _req
 
     async def _handle_engine_call(
@@ -1038,7 +1100,10 @@ class SGLangRollout(BaseRollout):
                 tool = self._tool_map[tool_schema.function.name]
                 create_kwargs = _req.tools_kwargs[tool.name].get("create_kwargs", {})
                 tool_creation_coroutines.append(tool.create(_req.request_id, **create_kwargs))
-            await asyncio.gather(*tool_creation_coroutines)
+            tool_creation_results = await asyncio.gather(*tool_creation_coroutines)
+            _req.add_tool_response_messages(
+                self.processing_class, [tool_result for _, tool_result in tool_creation_results]
+            )
         if _req.interaction_kwargs and self.interaction_map:
             interaction_kwargs = _req.interaction_kwargs
             # Get interaction by name from interaction_kwargs
@@ -1105,6 +1170,10 @@ class SGLangRollout(BaseRollout):
         messages = []
         reward_scores = []
         multi_modal_inputs = []
+        request_ids = []
+        if self.config.calculate_log_probs:
+            output_logprobs = []
+            rollout_output_token_ids = []
 
         for req in sorted_output_req_list:
             assert req.state == AsyncRolloutRequestStateEnum.COMPLETED, f"Request {req.request_id} is not completed"
@@ -1144,6 +1213,11 @@ class SGLangRollout(BaseRollout):
             messages.append({"messages": req.messages})
             reward_scores.append(req.reward_scores)
             multi_modal_inputs.append(req.multi_modal_inputs)
+            request_ids.append(req.request_id)
+            if self.config.calculate_log_probs:
+                # extract output log_probs
+                output_logprobs.append(req.rollout_log_probs[-len(req.response_ids) :])
+                rollout_output_token_ids.append(req.output_token_ids[-len(req.response_ids) :])
 
         prompt_ids = pad_sequence(
             prompt_ids,
@@ -1208,6 +1282,17 @@ class SGLangRollout(BaseRollout):
         response_loss_mask = pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
         if response_loss_mask.shape[1] < self.config.response_length:
             response_loss_mask = pad_sequence_to_length(response_loss_mask, self.config.response_length, 0)
+        if self.config.calculate_log_probs:
+            output_logprobs = pad_sequence(output_logprobs, padding_value=0.0, batch_first=True)
+            output_logprobs = pad_sequence_to_length(
+                output_logprobs, pad_token_id=0.0, max_seq_len=response_ids.shape[-1]
+            ).to(tgt_device)
+            rollout_output_token_ids = pad_sequence(
+                rollout_output_token_ids, padding_value=self.pad_token_id, batch_first=True
+            )
+            rollout_output_token_ids = pad_sequence_to_length(
+                rollout_output_token_ids, pad_token_id=self.pad_token_id, max_seq_len=response_ids.shape[-1]
+            ).to(tgt_device)
 
         input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
         attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
@@ -1225,19 +1310,31 @@ class SGLangRollout(BaseRollout):
             },
             batch_size=len(sorted_output_req_list),
         )
+        if self.config.calculate_log_probs:
+            batch["rollout_log_probs"] = output_logprobs
+            batch["rollout_output_token_ids"] = rollout_output_token_ids
 
         # free cache engine
         if self._engine is not None and self._tp_rank == 0:
             loop = asyncio.get_event_loop()
             loop.run_until_complete(self._engine.flush_cache())
 
+        non_tensor_batch = {
+            "messages": np.array(messages),
+            "reward_scores": np.array(reward_scores),
+            "request_id": np.array(request_ids),
+        }
+
+        is_multimodal = isinstance(self.processing_class, ProcessorMixin) and (
+            hasattr(self.processing_class, "image_processor") or hasattr(self.model_hf_config, "vision_config")
+        )
+
+        if is_multimodal:
+            non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs, dtype=object)
+
         return DataProto(
             batch=batch,
-            non_tensor_batch={
-                "messages": np.array(messages),
-                "reward_scores": np.array(reward_scores),
-                "multi_modal_inputs": np.array(multi_modal_inputs, dtype=object),
-            },
+            non_tensor_batch=non_tensor_batch,
         )
 
     def _preprocess_prompt_to_async_rollout_requests(self, prompts: DataProto, n: int = 1) -> list[AsyncRolloutRequest]:
@@ -1253,7 +1350,7 @@ class SGLangRollout(BaseRollout):
         )
 
         for data_idx, (raw_prompt, multi_modal_data) in enumerate(
-            zip(prompts.non_tensor_batch["raw_prompt"], multi_modal_data_list)
+            zip(prompts.non_tensor_batch["raw_prompt"], multi_modal_data_list, strict=True)
         ):
             if self._tool_schemas:
                 _tools_kwargs = prompts.non_tensor_batch["tools_kwargs"][data_idx]
@@ -1271,12 +1368,15 @@ class SGLangRollout(BaseRollout):
             else:
                 _interaction_kwargs = {}
 
+            if not isinstance(raw_prompt, list | np.ndarray):
+                raise TypeError(f"raw_prompt must be a list or numpy array, got {type(raw_prompt)}")
+
             req = AsyncRolloutRequest(
                 batch_data_id=data_idx,
                 rollout_offset=0,
                 request_id=str(uuid4()),
                 state=AsyncRolloutRequestStateEnum.PENDING,
-                messages=raw_prompt.tolist(),
+                messages=list(raw_prompt),
                 multi_modal_data=multi_modal_data,
                 tool_schemas=_tool_schemas,
                 tools_kwargs=_tools_kwargs,
@@ -1310,7 +1410,10 @@ class SGLangRollout(BaseRollout):
 
         return req_list
 
+    # ==================== server mode public methods ====================
+
     async def chat_completion(self, json_request):
+        """OpenAI chat completion API."""
         assert self._tp_rank == 0, "only called in tp rank 0"
         _input_ids = None
         _attention_mask = None
@@ -1392,19 +1495,21 @@ class SGLangRollout(BaseRollout):
         request_id: str,
         image_data: Optional[list[Any]] = None,
     ) -> torch.Tensor:
+        """Generate sequence with token-in-token-out."""
         request_sampling_params = self.sampling_params.copy()
         request_sampling_params.update(sampling_params)
         output = await self._handle_engine_generate(prompt_ids, request_sampling_params, image_data=image_data)
         return output["output_ids"]
 
     async def wake_up(self):
+        """Load model weights and build kv cache."""
         if not self.is_sleep:
             return
         await self.sharding_manager.wake_up()  # pylint: disable=C2801
         self.is_sleep = False
 
-    # this function is left for uniform train-inference resharding
     async def sleep(self):
+        """Offload model weights and discard kv cache."""
         if self.is_sleep:
             return
         await self.sharding_manager.sleep()

@@ -26,14 +26,25 @@ import torch
 
 from omegaconf import DictConfig
 from sglang.srt.entrypoints.engine import Engine
+from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from contextlib import contextmanager
 
 from verl.protocol import DataProto, all_gather_data_proto
 from verl.utils.device import get_torch_device
+<<<<<<< HEAD
 from verl.utils.megatron_utils import load_megatron_model_to_gpu, offload_megatron_model_to_cpu, per_tensor_generator
 from verl.utils.profiler import GPUMemoryLogger, log_gpu_memory_usage, simple_timer, get_most_used_gpu_memory, calculate_string_md5
+=======
+from verl.utils.megatron_utils import (
+    load_megatron_model_to_gpu,
+    offload_megatron_model_to_cpu,
+    per_tensor_generator,
+)
+from verl.utils.profiler import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
+from verl.workers.rollout.sglang_rollout.utils import get_named_tensor_buckets
+>>>>>>> main
 
 from .base import BaseShardingManager
 
@@ -129,6 +140,7 @@ class MegatronSGLangShardingManager(BaseShardingManager):
         loop.run_until_complete(self.sleep())
 
     async def update_weights(self, params):
+<<<<<<< HEAD
         def is_reach_max_packed_usage(packed_name_tensor, free_mem):
             size = sum([t.numel() * t.element_size() for _, t in packed_name_tensor])
             # mcore : 1; sglang: 1 (deserialize) + 1 (broadcast)
@@ -136,12 +148,24 @@ class MegatronSGLangShardingManager(BaseShardingManager):
             return  total_size > free_mem
 
         timing = {}
+=======
+        """
+        Update model weights using tensor buckets, similar to THUDM/slime's implementation.
+
+        Notes:
+          - For the best performance of `rebuild_cuda_tensor`, it is recommended to:
+              1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`.
+              2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
+            when using Tensor Parallelism (TP >= 8).
+          - See reference implementations in SLIME:
+            - Main logic: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L452
+            - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
+        """
+>>>>>>> main
         if self.device_mesh["tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
             await self.inference_engine.resume_memory_occupation()
-
-        # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
-        # named_tensors = [(k, v) for k, v in params.items()]
         named_tensors = params
+<<<<<<< HEAD
         load_format = None
         with simple_timer("weight_update_total", timing):
             with simple_timer("get_gpu_info", timing):
@@ -207,6 +231,20 @@ class MegatronSGLangShardingManager(BaseShardingManager):
             with simple_timer(f"post_update_weight", timing):
                 if self.device_mesh["tp"].get_local_rank() == 0:
                     await self.inference_engine.post_load_weights_from_tensor()
+=======
+
+        update_weights_bucket_bytes = int(self.rollout_config.update_weights_bucket_megabytes) << 20
+        for params_batch in get_named_tensor_buckets(named_tensors, update_weights_bucket_bytes):
+            await sgl_update_weights(
+                engine=self.inference_engine,
+                params_batch=params_batch,
+                device_mesh_key="tp",
+                device_mesh=self.device_mesh,
+            )
+
+        if self.device_mesh["tp"].get_local_rank() == 0:
+            await self.inference_engine.flush_cache()
+>>>>>>> main
 
         if not hasattr(self, '_first_call_update_weights') or not self._first_call_update_weights:
             self._first_call_update_weights = True

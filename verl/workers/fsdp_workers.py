@@ -15,13 +15,15 @@
 The main entry point to run the PPO algorithm
 """
 
+import datetime
 import json
 import logging
 import os
 import warnings
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional
 
+import numpy as np
 import psutil
 import torch
 import torch.distributed
@@ -38,7 +40,7 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, register
+from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -61,6 +63,7 @@ from verl.utils.fsdp_utils import (
     fsdp_version,
     get_fsdp_wrap_policy,
     get_init_weight_context_manager,
+    get_shard_placement_fn,
     init_fn,
     layered_summon_lora_params,
     load_fsdp_model_to_gpu,
@@ -71,8 +74,9 @@ from verl.utils.fsdp_utils import (
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
-from verl.utils.profiler.performance import reduce_timing
+from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
+from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, RolloutConfig
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 logger = logging.getLogger(__file__)
@@ -110,7 +114,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     or a hybrid engine based on the config.rollout
     """
 
-    def __init__(self, config: DictConfig, role: str):
+    def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
 
         self.config = config
@@ -123,6 +127,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
                 rank=rank,
                 world_size=world_size,
+                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
 
@@ -140,6 +145,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
             )
 
+        # create training dispatch
+        if self.ulysses_device_mesh is not None:
+            is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
+            self._register_dispatch_collect_info(
+                "actor", dp_rank=self.ulysses_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+        else:
+            self._register_dispatch_collect_info("actor", dp_rank=self.rank, is_collect=True)
+
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         self._lora_rank = self.config.model.get("lora_rank", 0)
         self._is_lora = self._lora_rank > 0
@@ -151,7 +165,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
-        profiler_config: Optional[ProfilerConfig] = None
         # TODO(haibin.lin):
         # As of now the type of config is DictConfig, if we assign config.profiler with ProfilerConfig,
         # it will actually convert the ProfilerConfig dataclass back to a DictConfig.
@@ -159,13 +172,30 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # as they provides DictConfig-like interface
         # The benefit of creating the dataclass config is to perform validation during __post_init__
         if self._is_actor:
-            profiler_config = omega_conf_to_dataclass(config.actor.get("profiler"))
-        if self._is_rollout:
-            profiler_config = omega_conf_to_dataclass(config.rollout.get("profiler"))
-        if self._is_ref:
-            profiler_config = omega_conf_to_dataclass(config.ref.get("profiler"))
-
-        DistProfilerExtension.__init__(self, DistProfiler(rank=self.rank, config=profiler_config))
+            omega_profiler_config = config.actor.get("profiler", {})
+        elif self._is_rollout:
+            # NOTE: In colocation mode, rollout config may not take effect (follow the actor config)
+            # This is for extendability in AsyncRL cases
+            omega_profiler_config = config.rollout.get("profiler", {})
+        elif self._is_ref:
+            omega_profiler_config = config.ref.get("profiler", {})
+        else:
+            raise ValueError(
+                f"Invalid role {self.role}, should be one of "
+                "['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref']"
+            )
+        # omega_profiler_config is DictConfig
+        # profiler_config is a ProfilerConfig dataclass
+        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
+        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch"]:
+            tool_config = omega_conf_to_dataclass(
+                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
+            )
+        else:
+            tool_config = None
+        DistProfilerExtension.__init__(
+            self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
+        )
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
@@ -215,7 +245,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def _build_model_optimizer(
         self,
         model_path,
-        fsdp_config,
+        fsdp_config: FSDPEngineConfig,
         optim_config,
         override_model_config,
         use_remove_padding=False,
@@ -411,11 +441,56 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     raise NotImplementedError(f"not implement {fsdp_strategy}")
 
-                if enable_activation_offload:
-                    enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
+# TODO: add transformer policy
+        # We force reference policy to use CPUOffload to save memory.
+        # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
+        cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
+        fsdp_strategy = self.config.actor.strategy
+        if fsdp_strategy == "fsdp":
+            actor_module_fsdp = FSDP(
+                actor_module,
+                cpu_offload=cpu_offload,
+                param_init_fn=init_fn,
+                auto_wrap_policy=auto_wrap_policy,
+                device_id=get_device_id(),
+                sharding_strategy=sharding_strategy,  # zero3
+                mixed_precision=mixed_precision,
+                sync_module_states=True,
+                device_mesh=self.device_mesh,
+                use_orig_params=fsdp_config.get("use_orig_params", False),
+                forward_prefetch=fsdp_config.get("forward_prefetch", False),
+            )
+        elif fsdp_strategy == "fsdp2":
+            assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+            mp_policy = MixedPrecisionPolicy(
+                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+            )
+            if role == "actor" and fsdp_config.offload_policy:
+                cpu_offload = CPUOffloadPolicy(pin_memory=True)
+                self._is_offload_param = False
+                self._is_offload_optimizer = False
+            else:
+                cpu_offload = None if role == "actor" else CPUOffloadPolicy(pin_memory=True)
 
-                log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
-                actor_module_fsdp.processor = self.processor
+            fsdp_kwargs = {
+                "mesh": fsdp_mesh,
+                "mp_policy": mp_policy,
+                "offload_policy": cpu_offload,
+                "reshard_after_forward": fsdp_config.reshard_after_forward,
+                "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
+            }
+            full_state = actor_module.state_dict()
+            apply_fsdp2(actor_module, fsdp_kwargs, fsdp_config)
+            fsdp2_load_full_state_dict(actor_module, full_state, fsdp_mesh, cpu_offload)
+            actor_module_fsdp = actor_module
+        else:
+            raise NotImplementedError(f"not implement {fsdp_strategy}")
+
+        if enable_activation_offload:
+            enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
+
+        log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
+        actor_module_fsdp.processor = self.processor
 
         # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
@@ -464,13 +539,32 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
         rollout_name = self.config.rollout.name
+
+        if rollout_name == "hf":
+            self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
+        else:
+            is_collect = rollout_device_mesh["infer_tp"].get_local_rank() == 0
+            self._register_dispatch_collect_info(
+                "rollout", dp_rank=rollout_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+
+        rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
+
         if rollout_name == "hf":
             from verl.workers.rollout import HFRollout
+<<<<<<< HEAD
             from verl.workers.sharding_manager import BaseShardingManager
             with self.timing_record("init_model/build_rollout/HFRollout"):
                 rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout, tokenizer=self.tokenizer)
                 rollout_sharding_manager = BaseShardingManager()
                 # TODO: a sharding manager that do nothing?
+=======
+            from verl.workers.sharding_manager.base import BaseShardingManager
+
+            rollout = HFRollout(module=self.actor_module_fsdp, config=rollout_config)
+            rollout_sharding_manager = BaseShardingManager()
+            # TODO: a sharding manager that do nothing?
+>>>>>>> main
 
         elif rollout_name == "vllm":
             from verl.workers.rollout.vllm_rollout import vLLMRollout
@@ -497,6 +591,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.timing_data[name] = v
             rollout.timing_data.clear()
 
+vllm_rollout_cls = vLLMRollout if rollout_config.mode == "sync" else vLLMAsyncRollout
+            rollout = vllm_rollout_cls(
+                model_path=local_path,
+                config=rollout_config,
+                tokenizer=self.tokenizer,
+                model_hf_config=self.actor_model_config,
+                device_mesh=rollout_device_mesh,
+                trust_remote_code=trust_remote_code,
+                **lora_kwargs,
+            )
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
             full_params = torch.distributed.get_world_size() == 1
@@ -514,7 +618,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif rollout_name == "sglang":
-            from verl.workers.rollout.sglang_rollout import SGLangRollout
+            from verl.workers.rollout.sglang_rollout.sglang_rollout import SGLangRollout
 
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
             # SGLang's model_runner would check CUDA device capability. However, due to verl's setting,
@@ -529,7 +633,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
             rollout = SGLangRollout(
                 actor_module=local_path,
-                config=self.config.rollout,
+                config=rollout_config,
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 model_hf_config=self.actor_model_config,
                 trust_remote_code=trust_remote_code,
@@ -563,9 +667,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # This is used to import external_lib into the huggingface systems
             import_external_libs(self.config.model.get("external_lib", None))
 
+<<<<<<< HEAD
             from omegaconf import OmegaConf
 
             override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+=======
+        override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
+        use_remove_padding = self.config.model.get("use_remove_padding", False)
+        use_shm = self.config.model.get("use_shm", False)
+        use_fused_kernels = self.config.model.get("use_fused_kernels", False)
+>>>>>>> main
 
             use_remove_padding = self.config.model.get("use_remove_padding", False)
             use_shm = self.config.model.get("use_shm", False)
@@ -613,12 +724,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
             # load from checkpoint
             if self._is_actor:
+<<<<<<< HEAD
                 OmegaConf.set_struct(self.config.actor, True)
                 with open_dict(self.config.actor):
                     self.config.actor.use_remove_padding = use_remove_padding
                     self.config.actor.use_fused_kernels = use_fused_kernels
                 with self.timing_record("init_model/build_actor_wrapper"):
                     self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
+=======
+                optim_config = self.config.actor.optim
+                fsdp_config = omega_conf_to_dataclass(self.config.actor.fsdp_config)
+            else:
+                optim_config = None
+                fsdp_config = FSDPEngineConfig()
+>>>>>>> main
 
             if self._is_rollout:
                 with self.timing_record("init_model/build_rollout"):
@@ -659,6 +778,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # If ActorRolloutRefWorker is initialized as a standalone rollout,
                 # create a checkpoint manager for FSDP model to allow loading FSDP checkpoints for rollout.
 
+<<<<<<< HEAD
                 checkpoint_contents = OmegaConf.create({"load_contents": ["model"], "save_contents": []})
                 self.checkpoint_manager = FSDPCheckpointManager(
                     model=self.actor_module_fsdp,
@@ -667,13 +787,71 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     processing_class=self.processor if self.processor is not None else self.tokenizer,
                     checkpoint_config=checkpoint_contents,
                 )
+=======
+        if self._is_actor:
+            actor_cfg = omega_conf_to_dataclass(self.config.actor)
+            self.actor = DataParallelPPOActor(
+                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
+            )
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="red")
+        if self._is_rollout:
+            self.rollout, self.rollout_sharding_manager = self._build_rollout(
+                trust_remote_code=self.config.model.get("trust_remote_code", False)
+            )
+
+        if self._is_ref:
+            ref_model_path = self.config.model.path
+            ref_model = self.config.ref.get("model", None)
+            if ref_model is not None:
+                ref_model_path = ref_model.get("path", self.config.model.path)
+
+            if self.rank == 0:
+                print("reference model:", ref_model_path)
+            local_path = copy_to_local(ref_model_path, use_shm=use_shm)
+            self.ref_module_fsdp = self._build_model_optimizer(
+                model_path=local_path,
+                fsdp_config=omega_conf_to_dataclass(self.config.ref.fsdp_config),
+                optim_config=None,
+                override_model_config=override_model_config,
+                use_remove_padding=use_remove_padding,
+                use_fused_kernels=use_fused_kernels,
+                trust_remote_code=self.config.model.get("trust_remote_code", False),
+                use_liger=self.config.model.get("use_liger", False),
+                role="ref",
+            )[0]
+            OmegaConf.set_struct(self.config.ref, True)
+            with open_dict(self.config.ref):
+                self.config.ref.use_remove_padding = use_remove_padding
+                self.config.ref.use_fused_kernels = use_fused_kernels
+            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+
+        if self._is_actor:
+            self.flops_counter = FlopsCounter(self.actor_model_config)
+            self.checkpoint_manager = FSDPCheckpointManager(
+                model=self.actor_module_fsdp,
+                optimizer=self.actor.actor_optimizer,
+                lr_scheduler=self.actor_lr_scheduler,
+                processing_class=self.processor if self.processor is not None else self.tokenizer,
+                checkpoint_config=self.config.actor.checkpoint,
+            )
+
+        if not self._is_actor and self._is_rollout:
+            # If ActorRolloutRefWorker is initialized as a standalone rollout,
+            # create a checkpoint manager for FSDP model to allow loading FSDP checkpoints for rollout.
+
+            checkpoint_contents = OmegaConf.create({"load_contents": ["model"], "save_contents": []})
+            self.checkpoint_manager = FSDPCheckpointManager(
+                model=self.actor_module_fsdp,
+                optimizer=None,
+                lr_scheduler=None,
+                processing_class=self.processor if self.processor is not None else self.tokenizer,
+                checkpoint_config=checkpoint_contents,
+            )
+>>>>>>> main
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
-        # Support all hardwares
-        data = data.to("cpu")  # data will to device with each micro batch on actor.update_policy
-
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
@@ -681,8 +859,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
 
         with self.ulysses_sharding_manager:
+<<<<<<< HEAD
             with self.timing_record('update_actor/preprocess_data'):
                 data = self.ulysses_sharding_manager.preprocess_data(data=data)
+=======
+            data = data.to("cpu")  # data will to device with each micro batch on actor.update_policy
+
+>>>>>>> main
             # perform training
 
             with Timer(name="update_policy", logger=None) as timer, self.timing_record('update_actor/update_policy'):
@@ -704,9 +887,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # TODO: here, we should return all metrics
             output = DataProto(meta_info={"metrics": metrics})
 
+<<<<<<< HEAD
 
             with self.timing_record('update_actor/postprocess_data'):
                 output = self.ulysses_sharding_manager.postprocess_data(data=output)
+=======
+>>>>>>> main
             output = output.to("cpu")
 
         with self.timing_record('update_actor/offload_fsdp_model'):
@@ -718,8 +904,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="red")
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    @DistProfiler.annotate(color="red", role="rollout_generate")
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
         with self.timing_record('generate_sequences/prompts_to_device'):
@@ -740,13 +926,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         with self.timing_record('generate_sequences/sync_gen'), self.rollout_sharding_manager:
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
+<<<<<<< HEAD
             with self.timing_record('generate_sequences/preprocess_data'):
                 prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             with self.timing_record('generate_sequences/generate_sequences'), _timer("generate_sequences", timing_generate):
+=======
+            with simple_timer("generate_sequences", timing_generate):
+>>>>>>> main
                 output = self.rollout.generate_sequences(prompts=prompts)
 
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
+<<<<<<< HEAD
             with self.timing_record('generate_sequences/postprocess_data'):
                 output = self.rollout_sharding_manager.postprocess_data(output)
 
@@ -756,10 +947,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.timing_data[name] = v
     
         self.rollout_sharding_manager.timing_data.clear()
+=======
+>>>>>>> main
         timing_generate.update(self.rollout_sharding_manager.timing)
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same
+        timing_generate_topk_ratio, timing_generate_min, timing_generate_max = topk_reduce_ratio_min_max(
+            timing_generate["generate_sequences"]
+        )
         timing_generate = reduce_timing(timing_generate)
+        timing_generate.update(
+            {
+                "generation_timing/max": timing_generate_max,
+                "generation_timing/min": timing_generate_min,
+                "generation_timing/topk_ratio": timing_generate_topk_ratio,
+            }
+        )
         output.meta_info["timing"] = timing_generate
         with self.timing_record('generate_sequences/D2H'):
             output = output.to("cpu")
@@ -769,8 +972,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             get_torch_device().empty_cache()
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="blue")
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     def compute_log_prob(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
@@ -793,17 +996,25 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
         # perform recompute log_prob
+<<<<<<< HEAD
         with self.timing_record('compute_log_prob/sync_compute_log_prob'), self.ulysses_sharding_manager:
             with self.timing_record('compute_log_prob/preprocess_data'):
                 data = self.ulysses_sharding_manager.preprocess_data(data)
             with self.timing_record('compute_log_prob/compute_log_prob'), adapter_ctx:
+=======
+        with self.ulysses_sharding_manager:
+            with adapter_ctx:
+>>>>>>> main
                 output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
             output = DataProto.from_dict(
                 tensors={"old_log_probs": output, "entropys": entropys},
                 meta_info={"temperature": self.config.rollout.temperature},
             )
+<<<<<<< HEAD
             with self.timing_record('compute_log_prob/postprocess_data'):
                 output = self.ulysses_sharding_manager.postprocess_data(output)
+=======
+>>>>>>> main
 
         with self.timing_record('compute_log_prob/D2H'):
             output = output.to("cpu")
@@ -821,8 +1032,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="olive")
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: DataProto):
         if self._is_lora:
             # if _is_lora, actor without lora applied is the ref
@@ -843,6 +1054,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["temperature"] = self.config.rollout.temperature
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+<<<<<<< HEAD
+=======
+        with self.ulysses_sharding_manager:
+            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+>>>>>>> main
 
         with self.timing_record('compute_ref_log_prob/sync_compute_ref_log_prob'), self.ulysses_sharding_manager:
             with self.timing_record('compute_ref_log_prob/preprocess_data'):
@@ -859,8 +1076,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
-        if self.world_size > 1 and fsdp_version(self.ref_policy.actor_module) == 1:
-            self.ref_policy.actor_module._handle.reshard(True)
+        if self.world_size > 1:
+            if fsdp_version(self.ref_policy.actor_module) == 1:
+                self.ref_policy.actor_module._handle.reshard(True)
+            elif fsdp_version(self.ref_policy.actor_module) == 2:
+                self.ref_policy.actor_module.reshard()
 
         return output
 
@@ -934,9 +1154,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             offload_fsdp_optimizer(self.actor_optimizer)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def start_profile(self) -> None:
+    def start_profile(self, **kwargs) -> None:
         """Start profiling for the current rank in the current training step."""
-        self.profiler.start()
+        self.profiler.start(**kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def stop_profile(self) -> None:
@@ -945,18 +1165,29 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
 
 class CriticWorker(Worker, DistProfilerExtension):
-    def __init__(self, config):
+    def __init__(self, config: FSDPCriticConfig):
         Worker.__init__(self)
+        omega_profiler_config = config.get("profiler", {})
+        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
+        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch"]:
+            tool_config = omega_conf_to_dataclass(
+                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
+            )
+        else:
+            tool_config = None
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=omega_conf_to_dataclass(config.get("profiler")))
+            self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
         import torch.distributed
 
+        self.config = config
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
-                backend=get_nccl_backend(), init_method=os.environ.get("DIST_INIT_METHOD", None)
+                backend=get_nccl_backend(),
+                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
-        self.config = config
+        self.config: FSDPCriticConfig = config
 
         # build device mesh for Ulysses Sequence Parallel
         world_size = torch.distributed.get_world_size()
@@ -972,6 +1203,15 @@ class CriticWorker(Worker, DistProfilerExtension):
             self.ulysses_device_mesh = init_device_mesh(
                 device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
             )
+
+        # create training dispatch
+        if self.ulysses_device_mesh is not None:
+            is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
+            self._register_dispatch_collect_info(
+                "critic", dp_rank=self.ulysses_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+        else:
+            self._register_dispatch_collect_info("critic", dp_rank=self.rank, is_collect=True)
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
@@ -1025,8 +1265,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                 self.processor.chat_template = self.config.model.custom_chat_template
             else:
                 self.tokenizer.chat_template = self.config.model.custom_chat_template
-
-        override_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+        override_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
         override_config_kwargs = {
             "bos_token_id": self.tokenizer.bos_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
@@ -1155,6 +1394,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                 "mp_policy": mp_policy,
                 "offload_policy": offload_policy,
                 "reshard_after_forward": fsdp_config.reshard_after_forward,
+                "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
             }
             full_state = critic_module.state_dict()
             apply_fsdp2(critic_module, fsdp_kwargs, fsdp_config)
@@ -1192,8 +1432,14 @@ class CriticWorker(Worker, DistProfilerExtension):
                 optimizer=critic_optimizer, num_warmup_steps=num_warmup_steps
             )
         elif warmup_style == "cosine":
+            min_lr_ratio = config.optim.get("min_lr_ratio", 0.0)
+            num_cycles = config.optim.get("num_cycles", 0.5)
             critic_lr_scheduler = get_cosine_schedule_with_warmup(
-                optimizer=critic_optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps
+                optimizer=critic_optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+                min_lr_ratio=min_lr_ratio,
+                num_cycles=num_cycles,
             )
         else:
             raise NotImplementedError(f"Warmup style {warmup_style} is not supported")
@@ -1231,7 +1477,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                     checkpoint_contents=self.config.checkpoint.contents,
                 )
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))
     @DistProfiler.annotate(color="cyan")
     def compute_values(self, data: DataProto):
         # Support all hardwares
@@ -1246,6 +1492,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz
         # perform forward computation
+<<<<<<< HEAD
         with self.timing_record('critical/compute_values/sync_compute'), self.ulysses_sharding_manager:
             with self.timing_record('critical/compute_values/preprocess_data'):
                 data = self.ulysses_sharding_manager.preprocess_data(data=data)
@@ -1254,6 +1501,11 @@ class CriticWorker(Worker, DistProfilerExtension):
             output = DataProto.from_dict(tensors={"values": values})
             with self.timing_record('critical/compute_values/postprocess_data'):
                 output = self.ulysses_sharding_manager.postprocess_data(data=output)
+=======
+        with self.ulysses_sharding_manager:
+            values = self.critic.compute_values(data=data)
+            output = DataProto.from_dict(tensors={"values": values})
+>>>>>>> main
 
 
         with self.timing_record('critical/compute_values/D2H'):
@@ -1263,7 +1515,7 @@ class CriticWorker(Worker, DistProfilerExtension):
                 offload_fsdp_model_to_cpu(self.critic_module)
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="critic"))
     @DistProfiler.annotate(color="pink")
     def update_critic(self, data: DataProto):
         # Support all hardwares
@@ -1277,11 +1529,16 @@ class CriticWorker(Worker, DistProfilerExtension):
                 load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=get_torch_device().current_device())
 
         # perform forward computation
+<<<<<<< HEAD
         with self.timing_record('critical/update_critic/sync_update_critic'), self.ulysses_sharding_manager:
             with self.timing_record('critical/update_critic/preprocess_data'):
                 data = self.ulysses_sharding_manager.preprocess_data(data=data)
 
             with self.timing_record('critical/update_critic/update_critic'), Timer(name="update_critic", logger=None) as timer:
+=======
+        with self.ulysses_sharding_manager:
+            with Timer(name="update_critic", logger=None) as timer:
+>>>>>>> main
                 metrics = self.critic.update_critic(data=data)
             delta_time = timer.last
 
@@ -1294,8 +1551,11 @@ class CriticWorker(Worker, DistProfilerExtension):
             self.critic_lr_scheduler.step()
 
             output = DataProto(batch=None, meta_info={"metrics": metrics})
+<<<<<<< HEAD
             with self.timing_record('critical/update_critic/postprocess_data'):
                 output = self.ulysses_sharding_manager.postprocess_data(data=output)
+=======
+>>>>>>> main
 
         with self.timing_record('critical/update_critic/offload_fsdp_model'):
             if self._is_offload_param:
@@ -1355,17 +1615,29 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
     def __init__(self, config):
         Worker.__init__(self)
+
+        omega_profiler_config = config.get("profiler", {})
+        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
+        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch"]:
+            tool_config = omega_conf_to_dataclass(
+                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
+            )
+        else:
+            tool_config = None
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=omega_conf_to_dataclass(config.get("profiler")))
+            self,
+            DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config),
         )
 
         import torch.distributed
 
+        self.config = config
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
-                backend=get_nccl_backend(), init_method=os.environ.get("DIST_INIT_METHOD", None)
+                backend=get_nccl_backend(),
+                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
-        self.config = config
 
         # build device mesh for Ulysses Sequence Parallel
         world_size = torch.distributed.get_world_size()
@@ -1383,6 +1655,15 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             )
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
+
+        # create training dispatch
+        if self.ulysses_device_mesh is not None:
+            is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
+            self._register_dispatch_collect_info(
+                "reward", dp_rank=self.ulysses_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+        else:
+            self._register_dispatch_collect_info("reward", dp_rank=self.rank, is_collect=True)
 
         self.use_remove_padding = self.config.model.get("use_remove_padding", False)
 
@@ -1463,6 +1744,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 "mesh": fsdp_mesh,
                 "offload_policy": cpu_offload,
                 "reshard_after_forward": config.model.fsdp_config.reshard_after_forward,
+                "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
             }
             full_state = reward_module.state_dict()
             apply_fsdp2(reward_module, fsdp_kwargs, config.model.fsdp_config)
@@ -1489,7 +1771,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 unpad_input,
             )
 
-        from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
+        from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 
         with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
@@ -1532,7 +1814,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
                 # gather output if sp > 1
                 if self.ulysses_sequence_parallel_size > 1:
-                    reward_rmpad = gather_outpus_and_unpad(
+                    reward_rmpad = gather_outputs_and_unpad(
                         reward_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
                     )
 
@@ -1577,11 +1859,13 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         rm_attention_mask = []
 
         for i in range(data.batch.batch_size[0]):
+            if not isinstance(data.non_tensor_batch["raw_prompt"][i], list | np.ndarray):
+                raise TypeError(
+                    f"raw_prompt must be a list or numpy array, got {type(data.non_tensor_batch['raw_prompt'][i])}"
+                )
+
             # extract raw prompt
-            if isinstance(data.non_tensor_batch["raw_prompt"][i], list):
-                chat: list = data.non_tensor_batch["raw_prompt"][i]
-            else:
-                chat: list = data.non_tensor_batch["raw_prompt"][i].tolist()
+            chat: list = list(data.non_tensor_batch["raw_prompt"][i])
 
             # extract response
             response_ids = data.batch["responses"][i]
@@ -1630,7 +1914,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         return DataProto.from_dict(rm_inputs)
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown")
     def compute_rm_score(self, data: DataProto):
         import itertools
@@ -1657,11 +1941,15 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             rm_data.batch = rm_data.batch.to(get_torch_device().current_device())
 
         # perform forward computation
+<<<<<<< HEAD
         with self.timing_record('reward/compute_rm_score/sync_compute'), self.ulysses_sharding_manager:
             with self.timing_record('reward/compute_rm_score/preprocess_data'):
                 rm_data = self.ulysses_sharding_manager.preprocess_data(data=rm_data)
                 data = self.ulysses_sharding_manager.preprocess_data(data=data)
 
+=======
+        with self.ulysses_sharding_manager:
+>>>>>>> main
             use_dynamic_bsz = self.config.use_dynamic_bsz
             if use_dynamic_bsz:
                 max_token_len = self.config.forward_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
@@ -1684,8 +1972,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             token_level_scores = self._expand_to_token_level(data, scores)
             # Note that this is only the scores, may not be the final rewards used to train RL
             output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+<<<<<<< HEAD
             with self.timing_record('reward/compute_rm_score/postprocess_data'):
                 output = self.ulysses_sharding_manager.postprocess_data(data=output)
+=======
+>>>>>>> main
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -1721,7 +2012,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     # ============================ vLLM related ============================
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
-    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
+    def execute_method(self, method: str | bytes, *args, **kwargs):
         """Called by ExternalRayDistributedExecutor collective_rpc."""
         return self.rollout.execute_method(method, *args, **kwargs)
 
@@ -1737,8 +2028,14 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         return ret
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD, blocking=False)
-    async def generate(self, prompt_ids: List[int], sampling_params: Dict[str, Any], request_id: str) -> List[int]:
-        ret = await self.rollout.generate(prompt_ids, sampling_params, request_id)
+    async def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+    ) -> list[int]:
+        ret = await self.rollout.generate(prompt_ids, sampling_params, request_id, image_data=image_data)
         return ret
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)

@@ -19,7 +19,7 @@ import logging
 import os
 import re
 from collections import defaultdict
-from typing import List, Optional, Union
+from typing import Optional
 
 import datasets
 import numpy as np
@@ -60,7 +60,7 @@ def collate_fn(data_list: list[dict]) -> dict:
         tensors[key] = torch.stack(val, dim=0)
 
     for key, val in non_tensors.items():
-        non_tensors[key] = np.array(val, dtype=object)
+        non_tensors[key] = np.fromiter(val, dtype=object, count=len(val))
 
     return {**tensors, **non_tensors}
 
@@ -84,12 +84,12 @@ class RLHFDataset(Dataset):
 
     def __init__(
         self,
-        data_files: Union[str, List[str]],
+        data_files: str | list[str],
         tokenizer: PreTrainedTokenizer,
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
     ):
-        if not isinstance(data_files, (List, ListConfig)):
+        if not isinstance(data_files, list | ListConfig):
             data_files = [data_files]
 
         self.data_files = copy.deepcopy(data_files)
@@ -107,6 +107,7 @@ class RLHFDataset(Dataset):
         self.return_full_prompt = config.get("return_full_prompt", False)
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
+        self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
 
         self.num_workers = config.get("filter_overlong_prompts_workers", max(1, os.cpu_count() // 4))
         self.num_workers = min(self.num_workers, os.cpu_count())
@@ -137,6 +138,9 @@ class RLHFDataset(Dataset):
 
         print(f"dataset len: {len(self.dataframe)}")
 
+        self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
+
+    def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
@@ -151,29 +155,30 @@ class RLHFDataset(Dataset):
                 def doc2len(doc) -> int:
                     messages = self._build_messages(doc)
                     raw_prompt = self.processor.apply_chat_template(
-                        messages, add_generation_prompt=True, tokenize=False
+                        messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
                     )
-                    images = (
-                        [process_image(image) for image in messages.pop(image_key)] if image_key in messages else None
-                    )
-                    videos = (
-                        [process_video(video) for video in messages.pop(video_key)] if video_key in messages else None
-                    )
+                    images = [process_image(image) for image in doc[image_key]] if image_key in doc else None
+                    videos = [process_video(video) for video in doc[video_key]] if video_key in doc else None
 
                     return len(processor(text=[raw_prompt], images=images, videos=videos)["input_ids"][0])
 
             else:
 
                 def doc2len(doc) -> int:
-                    return len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
+                    return len(
+                        tokenizer.apply_chat_template(
+                            doc[prompt_key], add_generation_prompt=True, **self.apply_chat_template_kwargs
+                        )
+                    )
 
-            self.dataframe = self.dataframe.filter(
+            dataframe = dataframe.filter(
                 lambda doc: doc2len(doc) <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
 
-            print(f"filter dataset len: {len(self.dataframe)}")
+            print(f"filter dataset len: {len(dataframe)}")
+        return dataframe
 
     def resume_dataset_state(self):
         self.serialize_dataset = not hasattr(self, "original_data_files")
@@ -219,7 +224,9 @@ class RLHFDataset(Dataset):
         if self.processor is not None:
             from verl.utils.dataset.vision_utils import process_image, process_video
 
-            raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            raw_prompt = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+            )
             multi_modal_data = {}
 
             images = None
@@ -258,7 +265,9 @@ class RLHFDataset(Dataset):
                 row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
-            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            raw_prompt = self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+            )
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")

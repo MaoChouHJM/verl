@@ -26,26 +26,32 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 
+import asyncio
+import getpass
 import logging
 import os
 import pickle
 import socket
-import threading
 from contextlib import contextmanager
+<<<<<<< HEAD
 import time
 from copy import deepcopy
+=======
+>>>>>>> main
 from types import MethodType
-from typing import Any, Dict, List, Union
+from typing import Any
 
 import numpy as np
 import ray
 import torch
 import torch.distributed
 import zmq
+import zmq.asyncio
 from filelock import FileLock
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig
 from tensordict import TensorDict
 from vllm import LLM, SamplingParams
+from vllm.config import CompilationConfig, CompilationLevel
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -53,7 +59,9 @@ from vllm.worker.worker_base import WorkerWrapperBase
 
 from verl import DataProto
 from verl.utils.profiler import GPUMemoryLogger
+from verl.utils.ray_utils import ray_noset_visible_devices
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
+from verl.workers.config import RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 
 logger = logging.getLogger(__file__)
@@ -66,7 +74,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 # NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
-def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[int]:
+def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> list[int]:
     # remove the left padding in the prompt token_id
     # pad_token_id = self.llm_engine.tokenizer.pad_token_id if self.llm_engine.tokenizer.pad_token_id
     # is not None else self.llm_engine.tokenizer.eos_token_id
@@ -76,7 +84,7 @@ def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[in
 
 
 class vLLMRollout(BaseRollout):
-    def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+    def __init__(self, model_path: str, config: RolloutConfig, tokenizer, model_hf_config, **kwargs):
         """A vLLM rollout. It requires the module is supported by the vllm.
 
         Args:
@@ -133,9 +141,22 @@ class vLLMRollout(BaseRollout):
                 max_position_embeddings = model_hf_config.text_config.max_position_embeddings
             if max_position_embeddings is None:
                 raise ValueError("max_position_embeddings not found in model_hf_config")
-
             assert max_position_embeddings >= config.prompt_length + config.response_length, (
                 "model context length should be greater than total sequence length"
+            )
+        else:
+            # handle type where there's a length extend factor
+            # see https://qwen.readthedocs.io/en/latest/deployment/vllm.html#extended-context-support
+            # for using yarn as an example
+            rope_scaling_factor = rope_scaling_config.get("factor", 1.0)
+
+            assert (
+                model_hf_config.max_position_embeddings * rope_scaling_factor
+                >= config.prompt_length + config.response_length
+            ), (
+                "model context length should be greater than total sequence length, "
+                + f"got rope_scaling_factor={rope_scaling_factor} and "
+                + f"max_position_embeddings={model_hf_config.max_position_embeddings}"
             )
 
         max_model_len = int(config.max_model_len or config.prompt_length + config.response_length)
@@ -152,11 +173,8 @@ class vLLMRollout(BaseRollout):
         lora_kwargs = kwargs.pop("lora_kwargs", {})
         self.lora_kwargs = lora_kwargs
         # copy it to avoid secretly modifying the engine config
-        engine_kwargs = (
-            {}
-            if "engine_kwargs" not in config or "vllm" not in config.engine_kwargs
-            else OmegaConf.to_container(deepcopy(config.engine_kwargs.vllm))
-        )
+        engine_kwargs = config.get("engine_kwargs", {}).get("vllm", {})
+
         # For each vLLM engine parameter,
         # - `None` means not setting it, so we pop it, and leave it to vLLM default value
         #    (which can vary across different vLLM versions);
@@ -165,6 +183,7 @@ class vLLMRollout(BaseRollout):
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 
+<<<<<<< HEAD
         engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images", 1), "video": 0}
         with self.timing_record("init_model/build_rollout/init_vllm_rollout/init_inference_engine"):
             self.inference_engine = LLM(
@@ -192,6 +211,47 @@ class vLLMRollout(BaseRollout):
             # Offload vllm model to reduce peak memory usage
             if config.free_cache_engine:
                 self.inference_engine.sleep(level=1)
+=======
+        compilation_config = {}
+
+        cudagraph_capture_sizes = config.get("cudagraph_capture_sizes")
+        # enforce_eager must be False to use cudagraph
+        if not config.enforce_eager and cudagraph_capture_sizes:
+            if isinstance(cudagraph_capture_sizes, ListConfig):
+                compilation_config["compilation_config"] = CompilationConfig(
+                    level=CompilationLevel.PIECEWISE, cudagraph_capture_sizes=cudagraph_capture_sizes
+                )
+            else:
+                logger.warning(f"cudagraph_capture_sizes must be a list, but got {cudagraph_capture_sizes}")
+
+        self.inference_engine = LLM(
+            model=model_path,
+            enable_sleep_mode=config.free_cache_engine,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend="external_launcher",
+            dtype=config.dtype,
+            enforce_eager=config.enforce_eager,
+            gpu_memory_utilization=config.gpu_memory_utilization,
+            disable_custom_all_reduce=True,
+            skip_tokenizer_init=False,
+            max_model_len=max_model_len,
+            max_num_seqs=config.max_num_seqs,
+            load_format=load_format,
+            disable_log_stats=config.disable_log_stats,
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=config.enable_chunked_prefill,
+            enable_prefix_caching=True,
+            trust_remote_code=trust_remote_code,
+            seed=config.get("seed", 0),
+            **compilation_config,
+            **lora_kwargs,
+            **engine_kwargs,
+        )
+
+        # Offload vllm model to reduce peak memory usage
+        if config.free_cache_engine:
+            self.inference_engine.sleep(level=2)
+>>>>>>> main
 
         kwargs = dict(
             n=1,
@@ -203,7 +263,7 @@ class vLLMRollout(BaseRollout):
 
         # supporting adding any sampling params from the config file
         for k in config.keys():
-            if hasattr(SamplingParams(), str(k)):
+            if hasattr(SamplingParams(), str(k)) and k != "seed":
                 kwargs[k] = config.get(k)
         kwargs["n"] = 1  # already repeat in ray_trainer
         print(f"kwargs: {kwargs}")
@@ -272,7 +332,7 @@ class vLLMRollout(BaseRollout):
         if "multi_modal_data" in non_tensor_batch:
             vllm_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(
-                non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data")
+                non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data"), strict=True
             ):
                 vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
         else:
@@ -280,15 +340,14 @@ class vLLMRollout(BaseRollout):
                 {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
             ]
 
-        # ensure the type of `prompt_token_ids` passed to vllm is list[int]
-        # https://github.com/volcengine/verl/pull/772
         for input_data in vllm_inputs:
-            if isinstance(input_data["prompt_token_ids"], np.ndarray):
-                input_data["prompt_token_ids"] = input_data["prompt_token_ids"].tolist()
-            elif not isinstance(input_data["prompt_token_ids"], list):
+            # Ensure token IDs are lists or numpy arrays
+            if not isinstance(input_data["prompt_token_ids"], list | np.ndarray):
                 raise TypeError(
                     f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}"
                 )
+
+            input_data["prompt_token_ids"] = list(input_data["prompt_token_ids"])
 
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)
@@ -444,49 +503,45 @@ class vLLMAsyncRollout:
         socket_type = "ipc" if tensor_parallel_size <= local_world_size else "tcp"
 
         # File lock to prevent multiple workers listen to same port
-        with FileLock("/tmp/verl_vllm_zmq.lock"):
+        with FileLock(f"/tmp/verl_vllm_zmq_{getpass.getuser()}.lock"):
             if socket_type == "ipc":
                 pid = os.getpid()
-                address = f"ipc:///tmp/verl_vllm_zmq_{pid}.ipc"
+                address = f"ipc:///tmp/verl_vllm_zmq_{pid}_{getpass.getuser()}.ipc"
             else:
                 ip, port = self._get_free_port()
                 address = f"tcp://{ip}:{port}"
-            context = zmq.Context()
+            context = zmq.asyncio.Context()
             self.socket = context.socket(zmq.REP)
             self.socket.bind(address)
 
-        self.loop_thread = threading.Thread(target=self._loop_forever)
-        self.loop_thread.start()
+        loop = asyncio.get_running_loop()
+        self.zmq_loop_task = loop.create_task(self._loop_forever())
 
         return address
 
     def _get_free_port(self):
-        ip = ray._private.services.get_node_ip_address()
+        ip = ray.util.get_node_ip_address()
         with socket.socket() as sock:
             sock.bind(("", 0))
             port = sock.getsockname()[1]
         return ip, port
 
-    def _loop_forever(self):
+    async def _loop_forever(self):
         while True:
-            message = self.socket.recv()
+            message = await self.socket.recv()
             method, args, kwargs = pickle.loads(message)
-            result = self.execute_method(method, *args, **kwargs)
-            self.socket.send(pickle.dumps(result))
+            result = await self._execute_method(method, *args, **kwargs)
+            await self.socket.send(pickle.dumps(result))
 
-    def get_zeromq_address(self):
-        return self.address
-
-    def init_worker(self, all_kwargs: List[Dict[str, Any]]):
+    def _init_worker(self, all_kwargs: list[dict[str, Any]]):
         """Initialize worker engine."""
         all_kwargs[0]["rank"] = int(os.environ["RANK"])
-        all_kwargs[0]["local_rank"] = 0
-
+        all_kwargs[0]["local_rank"] = 0 if not ray_noset_visible_devices() else int(os.environ.get("RAY_LOCAL_RANK", 0))
         self.vllm_config = all_kwargs[0]["vllm_config"]
         self.inference_engine = WorkerWrapperBase(vllm_config=self.vllm_config)
         self.inference_engine.init_worker(all_kwargs)
 
-    def load_model(self, *args, **kwargs):
+    def _load_model(self, *args, **kwargs):
         self.inference_engine.load_model(*args, **kwargs)
 
         # inference engine is initialized now, update sharding manager
@@ -495,28 +550,41 @@ class vLLMAsyncRollout:
 
         _monkey_patch_compute_logits(self.inference_engine.worker.model_runner.model, len(self.tokenizer))
 
-    def sleep(self, *args, **kwargs):
+    async def _execute_method(self, method: str | bytes, *args, **kwargs):
+        if method == "init_worker":
+            return self._init_worker(*args, **kwargs)
+        elif method == "load_model":
+            return self._load_model(*args, **kwargs)
+        elif method == "sleep":
+            return await self.sleep(*args, **kwargs)
+        elif method == "wake_up":
+            return await self.wake_up(*args, **kwargs)
+        else:
+            return self.inference_engine.execute_method(method, *args, **kwargs)
+
+    # ==================== server mode public methods ====================
+
+    def get_zeromq_address(self):
+        return self.address
+
+    async def sleep(self, *args, **kwargs):
         """Offload model weights and discard kv cache."""
         if self.is_sleep:
             return
         self.sharding_manager.__exit__(None, None, None)
         self.is_sleep = True
 
-    def wake_up(self, *args, **kwargs):
+    async def wake_up(self, *args, **kwargs):
         """Load model weights and build kv cache."""
         if not self.is_sleep:
             return
         self.sharding_manager.__enter__()  # pylint: disable=C2801
         self.is_sleep = False
 
-    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
-        if method == "init_worker":
-            return self.init_worker(*args, **kwargs)
-        elif method == "load_model":
-            return self.load_model(*args, **kwargs)
-        elif method == "sleep":
-            return self.sleep(*args, **kwargs)
-        elif method == "wake_up":
-            return self.wake_up(*args, **kwargs)
-        else:
-            return self.inference_engine.execute_method(method, *args, **kwargs)
+    async def generate(self, *args, **kwargs):
+        """Generate sequence with token-in-token-out."""
+        raise NotImplementedError
+
+    async def chat_completion(self, json_request):
+        """OpenAI chat completion API."""
+        raise NotImplementedError
